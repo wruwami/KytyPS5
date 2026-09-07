@@ -34,6 +34,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/imeOverlay.h"
 #include "graphics/presentation/renderDoc.h"
+#include "graphics/presentation/window/cursorAutoHide.h"
 #include "graphics/presentation/window/hostInput.h"
 #include "graphics/presentation/window/windowInternal.h"
 #include "kytyGitVersion.h"
@@ -190,6 +191,10 @@ constexpr uint32_t KYTY_SDL_BUTTON_X2MASK = SDL_BUTTON_X2MASK; // NOLINT(hicpp-s
 namespace {
 
 std::unique_ptr<WindowContext> g_window;
+
+CursorAutoHide g_cursor_auto_hide(DEFAULT_CURSOR_AUTO_HIDE_DELAY_MS, [](bool visible) {
+	SDL_ShowCursor(visible ? SDL_ENABLE : SDL_DISABLE);
+});
 
 } // namespace
 
@@ -458,6 +463,7 @@ void WindowContext::ProcessWindowEvent(const SDL_WindowEvent& event) {
 			break;
 		case SDL_WINDOWEVENT_LEAVE:
 			LOGF("Mouse left window %" PRIu32 "\n", window_event.windowID);
+			g_cursor_auto_hide.OnWindowLeave();
 			break;
 		case SDL_WINDOWEVENT_FOCUS_GAINED:
 			LOGF("Window %" PRIu32 " gained keyboard focus\n", window_event.windowID);
@@ -557,6 +563,8 @@ void WindowContext::ProcessEvent(double time_s) {
 
 		case SDL_MOUSEBUTTONDOWN:
 		case SDL_MOUSEBUTTONUP: {
+			g_cursor_auto_hide.OnButtonOrWheel(SDL_GetTicks64());
+
 			EventMouse mb {};
 
 			mb.down              = (event->button.type == SDL_MOUSEBUTTONDOWN);
@@ -584,6 +592,8 @@ void WindowContext::ProcessEvent(double time_s) {
 		}
 
 		case SDL_MOUSEWHEEL: {
+			g_cursor_auto_hide.OnButtonOrWheel(SDL_GetTicks64());
+
 			EventMouse mb {};
 
 			mb.down              = false;
@@ -611,6 +621,8 @@ void WindowContext::ProcessEvent(double time_s) {
 		}
 
 		case SDL_MOUSEMOTION: {
+			g_cursor_auto_hide.OnMotion(event->motion.xrel, event->motion.yrel, SDL_GetTicks64());
+
 			EventMouse mb {};
 
 			mb.down              = false;
@@ -789,6 +801,8 @@ void WindowContext::Run() {
 	loop.need_exit = false;
 	loop.paused.store(false, std::memory_order_release);
 
+	g_cursor_auto_hide.Hide();
+
 	while (!loop.need_exit) {
 		DrainMainThreadTasks();
 		if (loop.paused.load(std::memory_order_acquire)) {
@@ -799,11 +813,17 @@ void WindowContext::Run() {
 			timer.Resume();
 		}
 
-		if (!HostInputWaitEvent(&loop.event)) {
+		g_cursor_auto_hide.CheckIdle(SDL_GetTicks64());
+
+		const int timeout_ms = g_cursor_auto_hide.GetRemainingTimeoutMs(SDL_GetTicks64());
+		if (!HostInputWaitEvent(&loop.event, timeout_ms)) {
+			g_cursor_auto_hide.CheckIdle(SDL_GetTicks64());
 			continue;
 		}
 		ProcessEvent(timer.GetTimeS());
 	}
+
+	SDL_ShowCursor(SDL_ENABLE);
 }
 
 static void WindowCreate(WindowContext& context) {
@@ -864,6 +884,7 @@ static void WindowCreate(WindowContext& context) {
 
 	SDL_SetWindowResizable(context.window, SDL_FALSE);
 	context.UpdateIcon();
+	g_cursor_auto_hide.Hide();
 }
 
 uint32_t WindowContext::InitialWindowFlags(bool fullscreen) noexcept {
