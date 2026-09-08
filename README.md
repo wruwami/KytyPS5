@@ -6,6 +6,7 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20Linux%20x64%20%7C%20macOS%20x86__64-0078D4.svg)](#system-requirements)
 [![Status](https://img.shields.io/badge/status-early%20development-orange.svg)](#current-status)
 [![License](https://img.shields.io/badge/license-GPL--2.0-blue.svg)](LICENSE)
+[![codecov](https://codecov.io/gh/KytyPS5/KytyPS5/branch/main/graph/badge.svg)](https://codecov.io/gh/KytyPS5/KytyPS5)
 
 KytyPS5 is a free and open-source PlayStation 5 emulator written in C++ for Windows and Linux,
 with experimental macOS support. It is based on a heavily modified version of

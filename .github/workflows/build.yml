@@ -403,6 +403,90 @@ jobs:
           path: _Build/linux/install/**
           if-no-files-found: error
 
+  coverage:
+    name: Code Coverage
+    needs: metadata
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            clang \
+            llvm \
+            glslang-tools \
+            lcov \
+            libasound2-dev \
+            libdbus-1-dev \
+            libgl1-mesa-dev \
+            libpulse-dev \
+            libudev-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxext-dev \
+            libxfixes-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            libxrandr-dev \
+            libxss-dev \
+            lld \
+            ninja-build \
+            wayland-protocols
+
+      - name: Configure with Coverage
+        shell: bash
+        run: |
+          cmake -S . -B _Build/coverage \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DKYTY_BUILD_LAUNCHER=OFF \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_FLAGS="--coverage" \
+            -DCMAKE_CXX_FLAGS="--coverage" \
+            -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+
+      - name: Build tests
+        shell: bash
+        run: |
+          cmake --build _Build/coverage --target kyty_tests --parallel
+
+      - name: Run tests
+        shell: bash
+        run: |
+          ctest --test-dir _Build/coverage --output-on-failure \
+            -R '^(audio_out2_port|bit_array|event_queue_lifetime|guest_red_zone_patcher|image_page_table|ime_dialog|kernel_file_system|memory_tracker|page_manager|resource_materialization|resource_tracking|scalar_provenance|shader_cfg|shader_vertex_metadata|sync_on_address|virtual_memory_allocation)$'
+
+      - name: Generate coverage report
+        shell: bash
+        run: |
+          printf '#!/usr/bin/env bash\nexec llvm-cov gcov "$@"\n' > /tmp/gcov.sh
+          chmod +x /tmp/gcov.sh
+          lcov --capture --directory _Build/coverage --output-file coverage.info \
+            --gcov-tool /tmp/gcov.sh \
+            --rc derive_function_end_line=0 \
+            --ignore-errors mismatch,unused,inconsistent,inconsistent,gcov,version,corrupt \
+            --exclude '/usr/*' \
+            --exclude '*/3rdparty/*' \
+            --exclude '*/tests/*'
+          lcov --list coverage.info --ignore-errors unused,inconsistent,inconsistent || true
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: ${{ github.repository }}
+
   release:
     name: Release KytyPS5
     if: >-
