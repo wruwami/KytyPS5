@@ -2025,19 +2025,41 @@ int64_t KYTY_SYSV_ABI Recvfrom(int s, void* buf, uint64_t len, int flags, void* 
 
 	const auto host_len = static_cast<SocketIoLength>(
 	    std::min<uint64_t>(len, std::numeric_limits<SocketIoLength>::max()));
-	int64_t result = 0;
-	if (addr == nullptr) {
-		result = ::recv(socket, static_cast<char*>(buf), host_len, host_flags);
-	} else {
+#if defined(_WIN32)
+	const bool peek_waitall = ((host_flags & (MSG_PEEK | MSG_WAITALL)) == (MSG_PEEK | MSG_WAITALL));
+	const int  effective_flags = peek_waitall ? (host_flags & ~MSG_WAITALL) : host_flags;
+#else
+	const int effective_flags = host_flags;
+#endif
+
+	const auto do_recv = [&]() -> int64_t {
+		if (addr == nullptr) {
+			return ::recv(socket, static_cast<char*>(buf), host_len, effective_flags);
+		}
 		sockaddr_storage host_addr {};
 		SocketLength     host_addrlen = sizeof(host_addr);
-		result = ::recvfrom(socket, static_cast<char*>(buf), host_len, host_flags,
-		                    reinterpret_cast<sockaddr*>(&host_addr), &host_addrlen);
-		if (result >= 0 &&
-		    ConvertHostSockaddr(&host_addr, host_addrlen, addr, addrlen) != 0) {
+		const auto res = ::recvfrom(socket, static_cast<char*>(buf), host_len, effective_flags,
+		                            reinterpret_cast<sockaddr*>(&host_addr), &host_addrlen);
+		if (res >= 0 && ConvertHostSockaddr(&host_addr, host_addrlen, addr, addrlen) != 0) {
 			return -1;
 		}
+		return res;
+	};
+
+	int64_t result = do_recv();
+#if defined(_WIN32)
+	if (peek_waitall) {
+		while (result > 0 && static_cast<SocketIoLength>(result) < host_len) {
+			fd_set readfds;
+			FD_ZERO(&readfds);
+			FD_SET(socket, &readfds);
+			if (::select(0, &readfds, nullptr, nullptr, nullptr) <= 0) {
+				break;
+			}
+			result = do_recv();
+		}
 	}
+#endif
 	if (result < 0) {
 		return SetHostSocketError();
 	}
