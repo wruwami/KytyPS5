@@ -14,7 +14,6 @@
 
 namespace Libs::Graphics {
 
-struct VulkanBuffer;
 struct VulkanImage;
 struct VulkanMemory;
 
@@ -31,8 +30,11 @@ struct GraphicContext {
 	bool                               memory_budget_ext_enabled             = false;
 	bool                               rt_extensions_enabled                 = false;
 	bool                               compute_subgroup_size_control_enabled = false;
-	bool                               compute_wave64_supported              = false;
 	bool                               sample_rate_shading_enabled           = false;
+	bool                               attachment_feedback_loop_enabled      = false;
+	bool                               supports_block_texel_view              = false;
+	bool                                      mesh_shader_enabled                   = false;
+	vk::PhysicalDeviceMeshShaderPropertiesEXT mesh_shader_properties                = {};
 	uint32_t                           subgroup_size                         = 0;
 	uint32_t                           min_subgroup_size                     = 0;
 	uint32_t                           max_subgroup_size                     = 0;
@@ -80,6 +82,10 @@ struct GraphicContext {
 		return it->second.first;
 	}
 
+	[[nodiscard]] bool SupportsComputeWave64() const noexcept {
+		return subgroup_size == 64u || compute_subgroup_size_control_enabled;
+	}
+
 	[[nodiscard]] vk::DeviceSize StorageMinAlignment() const {
 		const auto alignment = physical_device_properties.limits.minStorageBufferOffsetAlignment;
 		return alignment != 0 ? alignment : 1;
@@ -91,11 +97,8 @@ struct GraphicContext {
 	[[nodiscard]] bool CanReportMemoryUsage() const noexcept { return memory_budget_ext_enabled; }
 	[[nodiscard]] uint64_t GetDeviceMemoryUsage() const;
 	[[nodiscard]] uint64_t GetTotalMemoryBudget() const;
-	void                   CreateBuffer(uint64_t size, VulkanBuffer& buffer);
 	[[nodiscard]] bool     CreateImage(const vk::ImageCreateInfo& info, VulkanImage& image);
 	void                   DeleteImage(VulkanImage& image);
-	void                   MapMemory(VulkanMemory& memory, void*& data);
-	void                   UnmapMemory(VulkanMemory& memory);
 	void                   AppendHardwareRayTracingDeviceExtensions(
 	    const std::vector<vk::ExtensionProperties>& available_extensions,
 	    std::vector<const char*>&                   device_extensions);
@@ -115,15 +118,9 @@ private:
 };
 
 struct VulkanMemory {
-	vk::MemoryRequirements  requirements       = {};
 	vk::MemoryPropertyFlags property           = {};
 	vk::MemoryPropertyFlags preferred_property = {};
-	vk::DeviceMemory        memory             = nullptr;
 	VmaAllocation           allocation         = nullptr;
-	VmaAllocationInfo       allocation_info    = {};
-	vk::DeviceSize          offset             = 0;
-	uint32_t                type               = 0;
-	uint64_t                unique_id          = 0;
 };
 
 struct VulkanImageState {
@@ -139,7 +136,6 @@ struct VulkanImage {
 	vk::Format                    format      = vk::Format::eUndefined;
 	vk::ImageType                 image_type  = vk::ImageType::e2D;
 	vk::Extent3D                  extent      = {1, 1, 1};
-	uint32_t                      guest_pitch = 0;
 	uint32_t                      layers      = 1;
 	uint32_t                      mip_levels  = 1;
 	uint32_t                      samples     = 1;
@@ -151,12 +147,7 @@ struct VulkanImage {
 	Graphics::VulkanMemory        memory;
 };
 
-struct VulkanBuffer {
-	vk::Buffer           buffer = nullptr;
-	VulkanMemory         memory;
-	vk::BufferUsageFlags usage       = {};
-	uint64_t             buffer_size = 0;
-};
+
 
 } // namespace Libs::Graphics
 
