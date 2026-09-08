@@ -462,7 +462,7 @@ void WindowContext::ProcessWindowEvent(const SDL_WindowEvent& event) {
 			break;
 		case SDL_WINDOWEVENT_LEAVE:
 			LOGF("Mouse left window %" PRIu32 "\n", window_event.windowID);
-			g_cursor_auto_hide.OnWindowLeave();
+			g_cursor_auto_hide.OnWindowLeave(SDL_GetTicks64());
 			break;
 		case SDL_WINDOWEVENT_FOCUS_GAINED:
 			LOGF("Window %" PRIu32 " gained keyboard focus\n", window_event.windowID);
@@ -822,7 +822,7 @@ void WindowContext::Run() {
 		ProcessEvent(timer.GetTimeS());
 	}
 
-	SDL_ShowCursor(SDL_ENABLE);
+	g_cursor_auto_hide.Show(SDL_GetTicks64());
 }
 
 static void WindowCreate(WindowContext& context) {

@@ -24,20 +24,22 @@ void TestInitialStateAndExplicitHide() {
 		last_visible = visible;
 	});
 
-	Check(!cursor.IsVisible(), "default cursor state should not be visible");
-	Check(cursor.GetRemainingTimeoutMs(1000) == -1, "hidden cursor should have infinite (-1) timeout");
+	Check(cursor.IsVisible(), "default cursor state should match SDL's visible cursor");
+	Check(cursor.GetRemainingTimeoutMs(0) == 2500, "visible cursor should start with the full timeout");
 
 	cursor.Hide();
-	Check(!cursor.IsVisible(), "cursor should still not be visible after Hide()");
-	Check(callback_count == 0, "no callback should fire if already hidden");
-	Check(last_visible, "last_visible should be unchanged");
+	Check(!cursor.IsVisible(), "cursor should not be visible after Hide()");
+	Check(callback_count == 1, "hide callback should fire for SDL's initially visible cursor");
+	Check(!last_visible, "hide callback should disable the cursor");
 }
 
 void TestMouseActivityShowsCursor() {
 	int show_count = 0;
 	int hide_count = 0;
 
-	CursorAutoHide cursor(2500, [&](bool visible) {
+	CursorAutoHide cursor(2500);
+	cursor.Hide();
+	cursor.SetShowCursorCallback([&](bool visible) {
 		if (visible) {
 			show_count++;
 		} else {
@@ -60,6 +62,7 @@ void TestMouseActivityShowsCursor() {
 
 void TestMotionFiltering() {
 	CursorAutoHide cursor(2500);
+	cursor.Hide();
 
 	// Zero-displacement noise should not trigger cursor visibility
 	cursor.OnMotion(0, 0, 1000);
@@ -107,6 +110,7 @@ void TestIdleAutoHiding() {
 
 void TestRemainingTimeoutCalculation() {
 	CursorAutoHide cursor(2500);
+	cursor.Hide();
 
 	Check(cursor.GetRemainingTimeoutMs(0) == -1, "timeout must be -1 when cursor is hidden");
 
@@ -123,12 +127,17 @@ void TestRemainingTimeoutCalculation() {
 void TestWindowLeaveRestoresCursor() {
 	bool visible_flag = false;
 	CursorAutoHide cursor(2500, [&](bool visible) { visible_flag = visible; });
+	cursor.Hide();
 
 	Check(!cursor.IsVisible(), "initially hidden");
 
-	cursor.OnWindowLeave();
+	cursor.OnWindowLeave(5000);
 	Check(cursor.IsVisible(), "cursor should be restored visible on window leave");
 	Check(visible_flag, "callback should reflect visible state on window leave");
+	Check(cursor.GetLastActivityMs() == 5000, "window leave should refresh the activity timestamp");
+
+	cursor.CheckIdle(5000);
+	Check(cursor.IsVisible(), "immediate idle check should not hide cursor restored on window leave");
 }
 
 void TestCustomIdleDelay() {

@@ -52,14 +52,7 @@ public:
 
 	void OnButtonOrWheel(uint64_t now_ms) { Show(now_ms); }
 
-	void OnWindowLeave() {
-		if (!m_visible) {
-			m_visible = true;
-			if (m_show_cursor_fn) {
-				m_show_cursor_fn(true);
-			}
-		}
-	}
+	void OnWindowLeave(uint64_t now_ms) { Show(now_ms); }
 
 	void CheckIdle(uint64_t now_ms) {
 		if (m_visible && (now_ms - m_last_activity_ms >= m_idle_delay_ms)) {
@@ -80,7 +73,7 @@ public:
 
 private:
 	uint64_t     m_idle_delay_ms    = DEFAULT_CURSOR_AUTO_HIDE_DELAY_MS;
-	bool         m_visible          = false;
+	bool         m_visible          = true; // SDL's cursor is visible by default.
 	uint64_t     m_last_activity_ms = 0;
 	ShowCursorFn m_show_cursor_fn;
 };
