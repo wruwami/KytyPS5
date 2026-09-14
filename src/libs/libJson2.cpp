@@ -525,6 +525,14 @@ static void* KYTY_SYSV_ABI JsonValueCtor(void* self) {
 	return self;
 }
 
+static JsonValue* KYTY_SYSV_ABI JsonValueCopyCtor(JsonValue* self, const JsonValue* src) {
+	PRINT_NAME();
+
+	JsonValueInit(self);
+	JsonValueCopy(self, src);
+	return self;
+}
+
 static JsonValue* KYTY_SYSV_ABI JsonValueTypeCtor(JsonValue* self, uint32_t type) {
 	PRINT_NAME();
 
@@ -998,6 +1006,21 @@ static int32_t KYTY_SYSV_ABI JsonValueCount(const JsonValue* self) {
 	}
 }
 
+static void KYTY_SYSV_ABI JsonValueClearMethod(void* self) {
+	PRINT_NAME();
+
+	LOGF("\t self = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
+
+	auto* value = reinterpret_cast<JsonValue*>(self);
+	if (value != nullptr) {
+		auto* parent    = value->parent;
+		auto* rootparam = value->rootparam;
+		JsonValueClear(value);
+		value->parent    = parent;
+		value->rootparam = rootparam;
+	}
+}
+
 LIB_DEFINE(InitNet_1_Json2) {
 	LIB_FUNC("-hJRce8wn1U", LibJson2::JsonMemAllocatorCtor);
 	LIB_FUNC("WSOuge5IsCg", LibJson2::JsonInitParameter2Ctor);
@@ -1014,6 +1037,7 @@ LIB_DEFINE(InitNet_1_Json2) {
 	LIB_FUNC("OcAgPxcq5Vk", LibJson2::JsonMemAllocatorDtor);
 	LIB_FUNC("qBMjqyBn3OM", LibJson2::JsonValueCtor);
 	LIB_FUNC("-wa17B7TGnw", LibJson2::JsonValueCtor);
+	LIB_FUNC("fSb2oQTNrgA", LibJson2::JsonValueCopyCtor);
 	LIB_FUNC("CbrT3dwDILo", LibJson2::JsonValueTypeCtor);
 	LIB_FUNC("WTtYf+cNnXI", LibJson2::JsonValueDtor);
 	LIB_FUNC("0eUrW9JAxM0", LibJson2::JsonValueDtor);
@@ -1067,6 +1091,7 @@ LIB_DEFINE(InitNet_1_Json2) {
 	LIB_FUNC("RBw+4NukeGQ", LibJson2::JsonValueCount);
 	LIB_FUNC("+drDFyAS6u4", LibJson2::JsonInitializerSetGlobalNullAccessCallback);
 	LIB_FUNC("00oCq0RwSAY", LibJson2::JsonInitializerSetGlobalNullAccessCallback);
+	LIB_FUNC("FIjXN2TkuTs", LibJson2::JsonValueClearMethod);
 }
 
 } // namespace LibJson2

@@ -661,26 +661,17 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 		return;
 	}
 
-	backing.format      = info.pixel_format;
-	backing.image_type  = HostImageType(info.type);
-	backing.extent      = info.extent;
-	backing.layers      = info.IsVolume() ? 1u : info.resources.layers;
-	backing.mip_levels  = info.resources.levels;
-	backing.samples     = info.samples;
-	backing.flags       = ImageCreateFlags(graphics, info);
-	backing.usage       = ImageUsageFlags(graphics, info);
-
 	vk::ImageCreateInfo create {};
-	create.flags         = backing.flags;
-	create.imageType     = backing.image_type;
-	create.extent        = backing.extent;
-	create.mipLevels     = backing.mip_levels;
-	create.arrayLayers   = backing.layers;
-	create.format        = backing.format;
+	create.flags         = ImageCreateFlags(graphics, info);
+	create.imageType     = HostImageType(info.type);
+	create.extent        = info.extent;
+	create.mipLevels     = info.resources.levels;
+	create.arrayLayers   = info.IsVolume() ? 1u : info.resources.layers;
+	create.format        = info.pixel_format;
 	create.tiling        = vk::ImageTiling::eOptimal;
-	create.initialLayout = backing.state.layout;
-	create.usage         = backing.usage;
-	create.samples       = vulkan_sample_count(backing.samples);
+	create.initialLayout = vk::ImageLayout::eUndefined;
+	create.usage         = ImageUsageFlags(graphics, info);
+	create.samples       = vulkan_sample_count(info.samples);
 
 	vk::ImageFormatProperties properties {};
 	if (graphics.GetImageFormatProperties(create.format, create.imageType, create.tiling,
@@ -691,10 +682,9 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 		     "flags=0x%x samples=%u\n",
 		     static_cast<int>(create.format), static_cast<int>(create.imageType),
 		     static_cast<vk::ImageUsageFlags::MaskType>(create.usage),
-		     static_cast<vk::ImageCreateFlags::MaskType>(create.flags), backing.samples);
+		     static_cast<vk::ImageCreateFlags::MaskType>(create.flags), info.samples);
 	}
 
-	backing.memory.property = vk::MemoryPropertyFlagBits::eDeviceLocal;
 	if (!graphics.CreateImage(create, backing)) {
 		EXIT("failed to create image: extent=%ux%ux%u format=%d layers=%u levels=%u\n",
 		     create.extent.width, create.extent.height, create.extent.depth,
@@ -703,11 +693,12 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 }
 
 uint64_t Image::HashGuestEdges() const {
-	constexpr uint64_t                         page_mask = TRACKER_PAGE_SIZE - 1;
 	std::array<uint8_t, TRACKER_PAGE_SIZE * 2> bytes {};
 	const auto                                 range = info.data;
-	const uint64_t head_end     = std::min(range.End(), (range.address + page_mask) & ~page_mask);
-	const uint64_t tail_begin   = std::max(range.address, range.End() & ~page_mask);
+	const uint64_t head_end =
+	    std::min(range.End(), Common::AlignUp(range.address, TRACKER_PAGE_SIZE));
+	const uint64_t tail_begin =
+	    std::max(range.address, Common::AlignDown(range.End(), TRACKER_PAGE_SIZE));
 	const uint64_t head_size    = head_end - range.address;
 	const uint64_t tail_address = tail_begin < head_end ? head_end : tail_begin;
 	const uint64_t tail_size    = range.End() - tail_address;

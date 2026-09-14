@@ -46,42 +46,34 @@
 
 namespace Libs::Graphics {
 
-int32_t ResolveVertexOffset(uint32_t index_offset, const ShaderVertexInputInfo& vs_input_info) {
-	if (index_offset != 0 || !vs_input_info.fetch_embedded) {
-		return static_cast<int32_t>(index_offset);
+std::pair<int32_t, uint32_t> ResolveDrawOffsets(uint32_t index_offset,
+	                                           const ShaderVertexInputInfo& vs_input_info) {
+	auto     vertex_offset   = static_cast<int32_t>(index_offset);
+	uint32_t instance_offset = 0;
+	if (!vs_input_info.fetch_embedded) {
+		return {vertex_offset, instance_offset};
 	}
 
 	EXIT_IF(!vs_input_info.stage);
 	const auto& program   = *vs_input_info.stage.program;
 	const auto& resources = vs_input_info.stage.resources;
-	if (program.info.vertex_offset_sgpr >= static_cast<int32_t>(program.user_data_base)) {
+	if (index_offset == 0 &&
+	    program.info.vertex_offset_sgpr >= static_cast<int32_t>(program.user_data_base)) {
 		const auto index =
 		    static_cast<uint32_t>(program.info.vertex_offset_sgpr) - program.user_data_base;
 		if (index < resources.user_data.size()) {
-			return static_cast<int32_t>(resources.user_data[index]);
+			vertex_offset = static_cast<int32_t>(resources.user_data[index]);
 		}
 	}
-
-	return 0;
-}
-
-uint32_t ResolveInstanceOffset(const ShaderVertexInputInfo& vs_input_info) {
-	if (!vs_input_info.fetch_embedded) {
-		return 0;
-	}
-
-	EXIT_IF(!vs_input_info.stage);
-	const auto& program   = *vs_input_info.stage.program;
-	const auto& resources = vs_input_info.stage.resources;
 	if (program.info.instance_offset_sgpr >= static_cast<int32_t>(program.user_data_base)) {
 		const auto index =
 		    static_cast<uint32_t>(program.info.instance_offset_sgpr) - program.user_data_base;
 		if (index < resources.user_data.size()) {
-			return resources.user_data[index];
+			instance_offset = resources.user_data[index];
 		}
 	}
 
-	return 0;
+	return {vertex_offset, instance_offset};
 }
 
 static std::atomic<uint32_t> g_draw_state_log_count   = 0;
@@ -461,17 +453,19 @@ struct DrawRenderState {
 	RenderColorInfo       color_info[RENDER_COLOR_ATTACHMENTS_MAX] = {};
 	uint32_t              color_count                              = 0;
 	bool                  ps_active                                = true;
-	ShaderVertexInputInfo vs_input_info;
+	std::array<ShaderVertexInputInfo, 3> vertex_info;
 	ShaderPixelInputInfo  ps_input_info;
 	PipelineCache::GraphicsPrograms programs;
 };
 
 struct DrawCallInfo {
-	const char*          name           = nullptr;
 	CommandBufferDebugOp debug_op       = CommandBufferDebugOp::DrawIndex;
 	uint32_t             index_count    = 0;
 	uint32_t             instance_count = 0;
 	uint32_t             first_instance = 0;
+
+	[[nodiscard]] bool IsIndexed() const { return debug_op == CommandBufferDebugOp::DrawIndex; }
+	[[nodiscard]] const char* Name() const { return IsIndexed() ? "DrawIndex" : "DrawIndexAuto"; }
 };
 
 RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderColorInfo* colors,
@@ -544,11 +538,11 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		    !cache.ClearMeta(metadata.range.address)) {
 			EXIT("failed to acquire HTile metadata for a depth clear\n");
 		}
-		depth.depth_meta_clear_enable =
+		const bool meta_clear =
 		    metadata.kind == ImageMetadataKind::Htile &&
 		    cache.IsMetaCleared(metadata.range.address, depth.desc.view_info.base_layer);
-		depth.depth_load_clear_enable = depth.depth_clear_enable || depth.depth_meta_clear_enable;
-		if (depth.depth_meta_clear_enable &&
+		depth.depth_load_clear_enable = depth.depth_clear_enable || meta_clear;
+		if (meta_clear &&
 		    !cache.TouchMeta(metadata.range.address, depth.desc.view_info.base_layer, false)) {
 			EXIT("failed to consume HTile clear state\n");
 		}
@@ -662,7 +656,6 @@ static bool ConsumeMetadataColorOperation(const CommandBuffer& buffer) {
 }
 
 struct DrawEmitInfo {
-	bool     indexed       = false;
 	int32_t  vertex_offset = 0;
 	uint32_t first_vertex  = 0;
 	uint32_t first_instance = 0;
@@ -838,6 +831,7 @@ static bool GetDrawTopology(const HW::UserConfig& ucfg, bool auto_draw,
 		case Prospero::PrimitiveType::kTriStrip:
 			topology = vk::PrimitiveTopology::eTriangleStrip;
 			break;
+		case Prospero::PrimitiveType::kPatch:
 		case Prospero::PrimitiveType::kRectList:
 			topology = vk::PrimitiveTopology::ePatchList;
 			break;
@@ -863,8 +857,8 @@ static bool GetDrawTopology(const HW::UserConfig& ucfg, bool auto_draw,
 	return true;
 }
 
-static bool ResolvePrimitiveRestart(const CommandBuffer& buffer, vk::PrimitiveTopology topology,
-                                    uint32_t index_type_and_size) {
+static bool ResolvePrimitiveRestart(const CommandBuffer& buffer,
+                                    const DrawIndexBufferSource& source) {
 	const auto control = buffer.GetUserConfig().GetPrimitiveResetControl();
 	EXIT_NOT_IMPLEMENTED((control & ~0x3u) != 0);
 	if ((control & 0x1u) == 0) {
@@ -876,58 +870,61 @@ static bool ResolvePrimitiveRestart(const CommandBuffer& buffer, vk::PrimitiveTo
 		case Prospero::PrimitiveType::kTriStrip: break;
 		default: return false;
 	}
-	if (topology != vk::PrimitiveTopology::eLineStrip &&
-	    topology != vk::PrimitiveTopology::eTriangleStrip &&
-	    topology != vk::PrimitiveTopology::eTriangleFan) {
-		return false;
-	}
 
-	uint32_t index_mask = 0;
-	switch (static_cast<Prospero::IndexType>(index_type_and_size)) {
-		case Prospero::IndexType::kIndex8: index_mask = 0xffu; break;
-		case Prospero::IndexType::kIndex16: index_mask = 0xffffu; break;
-		case Prospero::IndexType::kIndex32: index_mask = 0xffffffffu; break;
-		default: EXIT("unknown index_type_and_size: %u\n", index_type_and_size);
-	}
-
-	const auto reset_index = buffer.GetRegisters().GetPrimitiveResetIndex();
+	const auto element_size = source.guest_element_size;
+	const auto index_mask   = UINT32_MAX >> ((4 - element_size) * 8);
+	const auto reset_index  = buffer.GetRegisters().GetPrimitiveResetIndex();
 	if ((control & 0x2u) != 0 && (reset_index & ~index_mask) != 0) {
 		return false;
 	}
-	EXIT_NOT_IMPLEMENTED((reset_index & index_mask) != index_mask);
-	return true;
+	const auto restart_index = reset_index & index_mask;
+	if (restart_index == index_mask) {
+		// Use native restart; the 8-bit path widens its marker to 0xffff.
+		return true;
+	}
+
+	// A game can set a custom reset value without using it in the index buffer.
+	// Keep restart off in that case; fail if we actually find the value.
+	// Scan before preparing draw resources: readback can restart the command buffer.
+	EXIT_NOT_IMPLEMENTED(source.address == 0);
+	const auto* indices = reinterpret_cast<const uint8_t*>(source.address);
+	for (uint64_t offset = 0; offset < source.size; offset += element_size) {
+		uint32_t index = 0;
+		std::memcpy(&index, indices + offset, element_size);
+		EXIT_NOT_IMPLEMENTED(index == restart_index);
+	}
+	return false;
 }
 
-bool RenderExecutor::PrepareDrawRenderState(uint64_t submit_id, CommandBuffer& buffer,
-                                            const DrawCallInfo& draw,
+bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
                                             uint32_t            render_target_slice_offset,
-                                            bool log_setup_phases, DrawRenderState& state) {
+	                                        DrawRenderState& state) {
 	auto& ctx = buffer.GetRegisters();
 
-	if (ResolveColorTargets(submit_id, buffer, render_target_slice_offset)) {
+	if (ResolveColorTargets(buffer, render_target_slice_offset)) {
 		return false;
 	}
-	if (log_setup_phases) {
-		LogDrawPhase(draw.name, "ResolveRenderColorTarget");
+	if (draw.IsIndexed()) {
+		LogDrawPhase(draw.Name(), "ResolveRenderColorTarget");
 	}
 	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
 		if (slot == 0 || (render_target_mask_slot(ctx.GetRenderTargetMask(), slot) != 0 &&
 		                  ctx.GetRenderTarget(slot).base.addr != 0)) {
-			ResolveRenderColorTarget(submit_id, buffer, state.color_info[state.color_count],
+			ResolveRenderColorTarget(buffer, state.color_info[state.color_count],
 			                         render_target_slice_offset, slot);
 			if (state.color_info[state.color_count].image_id) {
 				state.color_count++;
 			}
 		}
 	}
-	if (log_setup_phases) {
-		LogDrawPhase(draw.name, "ResolveRenderDepthTarget");
+	if (draw.IsIndexed()) {
+		LogDrawPhase(draw.Name(), "ResolveRenderDepthTarget");
 	}
-	ResolveRenderDepthTarget(submit_id, buffer, state.depth_info);
+	ResolveRenderDepthTarget(buffer, state.depth_info);
 
 	state.ps_active       = DrawHasActivePixelShader(buffer);
 	if (state.color_count == 0 && !state.depth_info.image_id && !state.ps_active) {
-		LogFramebufferSkip(draw.name, state.color_info[0], state.depth_info, buffer,
+		LogFramebufferSkip(draw.Name(), state.color_info[0], state.depth_info, buffer,
 		                   draw.index_count, 0);
 		return false;
 	}
@@ -935,7 +932,7 @@ bool RenderExecutor::PrepareDrawRenderState(uint64_t submit_id, CommandBuffer& b
 	return true;
 }
 
-static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw, bool log_phases,
+static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
                            DrawRenderState& state) {
 	auto& ctx    = buffer.GetRegisters();
 	auto& sh_ctx = buffer.GetShaders();
@@ -952,12 +949,12 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw, bool
 		target_export_mapping[state.color_info[i].target_slot] = state.color_info[i].export_mapping;
 	}
 	auto& pipeline_cache = buffer.GetContext().GetPipelineCache();
-	if (log_phases) {
-		LogDrawPhase(draw.name, "GetGraphicsPrograms");
+	if (draw.IsIndexed()) {
+		LogDrawPhase(draw.Name(), "GetGraphicsPrograms");
 	}
 	state.programs = pipeline_cache.GetGraphicsPrograms(
 	    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
-	    target_export_mapping, state.ps_active, state.vs_input_info, state.ps_input_info);
+	    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info);
 }
 
 static PreparedIndexBuffer PrepareIndexBuffer(CommandBuffer&               buffer,
@@ -971,17 +968,14 @@ static PreparedIndexBuffer PrepareIndexBuffer(CommandBuffer&               buffe
 		auto& stream = buffer.GetContext().GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream);
 		prepared.offset = stream.Copy(source.host_data, source.size, 16);
 		prepared.buffer = stream.Handle();
+		SetVulkanObjectNameF(buffer.GetContext().GetGraphics().device, prepared.buffer,
+		                     "Kyty.IndexBuffer[guest=transient size=0x{:x} type={}]", source.size,
+		                     static_cast<uint32_t>(source.type));
 	} else {
 		auto [buffer_ptr, offset] =
 		    buffer.GetContext().GetBufferCache().ObtainBuffer(source.address, source.size, false);
 		prepared.buffer = buffer_ptr->Handle();
 		prepared.offset = offset;
-	}
-	if (source.host_data != nullptr) {
-		SetVulkanObjectNameF(buffer.GetContext().GetGraphics().device, prepared.buffer,
-		                     "Kyty.IndexBuffer[guest=transient size=0x{:x} type={}]", source.size,
-		                     static_cast<uint32_t>(source.type));
-	} else {
 		SetVulkanObjectNameF(buffer.GetContext().GetGraphics().device, prepared.buffer,
 		                     "Kyty.IndexBuffer[guest=0x{:016x} size=0x{:x} type={}]",
 		                     source.address, source.size, static_cast<uint32_t>(source.type));
@@ -1008,22 +1002,22 @@ static void CommitIndexBuffer(vk::CommandBuffer vk_buffer, const PreparedIndexBu
 }
 
 static void LogDrawStateIfNeeded(const CommandBuffer& buffer, const DrawCallInfo& draw,
-                                 const DrawRenderState& state, bool always_log,
-                                 bool force_legacy_rect_log, uint32_t index_type_and_size,
+	                             const DrawRenderState& state, uint32_t index_type_and_size,
                                  const void* index_addr) {
 	if (!graphics_debug_dump_enabled()) {
 		return;
 	}
 
-	if (!always_log && !force_legacy_rect_log) {
+	if (!draw.IsIndexed() &&
+	    buffer.GetUserConfig().GetPrimType() != Prospero::PrimitiveType::kRectListLegacy) {
 		return;
 	}
 
 	if (state.ps_active) {
-		LogDrawTargetState(draw.name, state.color_info[0], state.depth_info, buffer,
+		LogDrawTargetState(draw.Name(), state.color_info[0], state.depth_info, buffer,
 		                   state.ps_input_info, draw.index_count, 0);
 	}
-	LogDrawInputState(buffer, state.color_info[0], state.vs_input_info, index_type_and_size,
+	LogDrawInputState(buffer, state.color_info[0], state.vertex_info[0], index_type_and_size,
 	                  draw.index_count, index_addr);
 }
 
@@ -1038,7 +1032,8 @@ static void EmitDrawPrimitives(const HW::UserConfig& ucfg, vk::CommandBuffer vk_
 		case Prospero::PrimitiveType::kTriFan:
 		case Prospero::PrimitiveType::kTriStrip:
 		case Prospero::PrimitiveType::kRectList:
-			if (emit.indexed) {
+		case Prospero::PrimitiveType::kPatch:
+			if (draw.IsIndexed()) {
 				vk_buffer.drawIndexed(draw.index_count, draw.instance_count, 0, emit.vertex_offset,
 				                      emit.first_instance);
 			} else {
@@ -1047,7 +1042,7 @@ static void EmitDrawPrimitives(const HW::UserConfig& ucfg, vk::CommandBuffer vk_
 			}
 			break;
 		case Prospero::PrimitiveType::kRectListLegacy:
-			if (emit.indexed) {
+			if (draw.IsIndexed()) {
 				EXIT("unknown primitive type: %u\n", static_cast<uint32_t>(ucfg.GetPrimType()));
 			}
 			// Sarah
@@ -1057,7 +1052,7 @@ static void EmitDrawPrimitives(const HW::UserConfig& ucfg, vk::CommandBuffer vk_
 		case Prospero::PrimitiveType::kQuadListLegacy:
 			EXIT_NOT_IMPLEMENTED((draw.index_count & 0x3u) != 0);
 			for (uint32_t i = 0; i < draw.index_count; i += 4) {
-				if (emit.indexed) {
+				if (draw.IsIndexed()) {
 					vk_buffer.drawIndexed(4, draw.instance_count, i, emit.vertex_offset,
 					                      emit.first_instance);
 				} else {
@@ -1074,16 +1069,17 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
                                          const DrawCallInfo& draw, DrawRenderState& state,
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source,
-                                         bool primitive_restart_enable, bool log_pipeline_phase,
-                                         bool set_bind_debug, bool set_auto_debug) {
+	                                     bool primitive_restart_enable) {
 	auto& ucfg = buffer.GetUserConfig();
-	const bool mesh_active = state.vs_input_info.stage.program->stage == ShaderType::Mesh;
+	const auto vertex_stages =
+	    std::span {state.vertex_info.data(), state.programs.VertexStageCount()};
+	const bool mesh_active = state.vertex_info[0].stage.program->stage == ShaderType::Mesh;
 	uint32_t   mesh_groups = 0;
 	if (mesh_active) {
-		const auto& mesh = state.vs_input_info.mesh;
+		const auto& mesh = state.vertex_info[0].mesh;
 		if (primitive_restart_enable || mesh.primitives_per_group == 0) {
 			EXIT("unsupported mesh draw: primitive=%u indexed=%u restart=%u\n",
-			     static_cast<uint32_t>(ucfg.GetPrimType()), emit.indexed, primitive_restart_enable);
+			     static_cast<uint32_t>(ucfg.GetPrimType()), draw.IsIndexed(), primitive_restart_enable);
 		}
 		const auto primitives = mesh.InputPrimitiveCount(draw.index_count);
 		if (primitives == 0 || draw.instance_count == 0) {
@@ -1100,64 +1096,62 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 	}
 
-	if (mesh_active && emit.indexed) {
+	if (mesh_active && draw.IsIndexed()) {
 		// Register the original guest indices for shader reads; PrepareGraphicsBindings
 		// synchronizes registered BDA ranges before any draw commands are committed.
 		(void)m_context.GetBufferCache().FindBuffer(
 		    index_source.address, static_cast<uint64_t>(draw.index_count) *
 		                              index_source.guest_element_size);
 	}
-	LogDrawPhase(draw.name, "PrepareBindings");
-	auto bindings = PrepareGraphicsBindings(state.vs_input_info.stage, state.ps_input_info.stage,
-	                                        state.ps_active);
+	LogDrawPhase(draw.Name(), "PrepareBindings");
+	GraphicsBindings                 bindings;
+	std::array<PreparedBindings*, 4> descriptor_stages {};
+	uint32_t                         stage_count = 0;
+	for (uint32_t i = 0; i < vertex_stages.size(); i++) {
+		bindings.vertex[i]               = PrepareBindings(state.vertex_info[i].stage);
+		descriptor_stages[stage_count++] = &bindings.vertex[i];
+	}
+	if (state.ps_active) {
+		bindings.pixel.emplace(PrepareBindings(state.ps_input_info.stage));
+		descriptor_stages[stage_count++] = &*bindings.pixel;
+	}
+	const auto stages = std::span {descriptor_stages.data(), stage_count};
+	PrepareGraphicsBindings(stages);
 	PreparedVertexBuffers vertex_bindings;
 	PreparedIndexBuffer   index_binding;
 	if (!mesh_active) {
-		LogDrawPhase(draw.name, "PrepareVertexBuffers");
-		vertex_bindings = AcquireVertexBuffers(buffer, state.vs_input_info);
+		LogDrawPhase(draw.Name(), "PrepareVertexBuffers");
+		vertex_bindings = AcquireVertexBuffers(buffer, state.vertex_info[0]);
 		index_binding   = PrepareIndexBuffer(buffer, index_source);
 	}
 	const auto rendering =
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
 	                         bindings.pixel);
 
-	if (log_pipeline_phase) {
-		LogDrawPhase(draw.name, "CreatePipeline");
+	if (draw.IsIndexed()) {
+		LogDrawPhase(draw.Name(), "CreatePipeline");
 	}
-	auto& pipeline = m_context.GetPipelineCache().CreateGraphicsPipeline(
-	    std::span {state.color_info, state.color_count}, state.depth_info, state.vs_input_info, buffer,
+	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(
+	    std::span {state.color_info, state.color_count}, state.depth_info, vertex_stages, buffer,
 	    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable,
-	    state.programs.vertex, state.programs.pixel);
+	    state.programs);
 
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
 	// point onward, every operation targets the current command buffer and cannot touch guest
 	// memory.
 	auto vk_buffer = buffer.Handle();
-	if (set_bind_debug) {
-		SetDrawDebugPhase(buffer, submit_id, draw, 0x100u);
-	}
-	if (set_auto_debug) {
-		SetDrawDebugPhase(buffer, submit_id, draw, 0x200u);
-	}
+	SetDrawDebugPhase(buffer, submit_id, draw, draw.IsIndexed() ? 0x100u : 0x200u);
 	if (!mesh_active) {
 		CommitVertexBuffers(vk_buffer, vertex_bindings);
 	}
-	if (bindings.pixel.has_value()) {
-		if (set_auto_debug) {
-			SetDrawDebugPhase(buffer, submit_id, draw, 0x300u);
-		}
+	if (bindings.pixel && !draw.IsIndexed()) {
+		SetDrawDebugPhase(buffer, submit_id, draw, 0x300u);
 	}
-	std::array<PreparedBindings*, 2> descriptor_stages {&bindings.vertex, nullptr};
-	const size_t                     descriptor_stage_count = bindings.pixel.has_value() ? 2u : 1u;
-	if (bindings.pixel) {
-		descriptor_stages[1] = &*bindings.pixel;
-	}
-	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline,
-	               std::span {descriptor_stages.data(), descriptor_stage_count});
+	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
 	if (mesh_active) {
 		const uint32_t draw_data[] {
 		    draw.index_count,
-		    emit.indexed ? static_cast<uint32_t>(emit.vertex_offset) : emit.first_vertex,
+		    draw.IsIndexed() ? static_cast<uint32_t>(emit.vertex_offset) : emit.first_vertex,
 		    emit.first_instance, index_source.guest_element_size,
 		    static_cast<uint32_t>(index_source.address),
 		    static_cast<uint32_t>(index_source.address >> 32u)};
@@ -1170,7 +1164,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		CommitIndexBuffer(vk_buffer, index_binding);
 	}
 
-	SetGraphicsDynamicParams(buffer, vk_buffer, state.vs_input_info, state.color_info,
+	SetGraphicsDynamicParams(buffer, vk_buffer, vertex_stages.back(), state.color_info,
 	                         state.color_count, state.depth_info);
 	if (m_context.GetGraphics().attachment_feedback_loop_enabled) {
 		vk_buffer.setAttachmentFeedbackLoopEnableEXT(
@@ -1180,28 +1174,29 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		        : vk::ImageAspectFlags {});
 	}
 
-	LogDrawPhase(draw.name, "BeginRendering");
-	if (set_auto_debug) {
+	LogDrawPhase(draw.Name(), "BeginRendering");
+	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x400u);
 	}
 	m_context.GetCommandScheduler().BeginRendering(rendering);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
-	if (set_auto_debug) {
+	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u);
 	}
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
 	} else {
-		EmitDrawPrimitives(ucfg, vk_buffer, state.vs_input_info, draw, emit);
+		EmitDrawPrimitives(ucfg, vk_buffer, state.vertex_info[0], draw, emit);
 	}
 
-	if (set_auto_debug) {
+	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u);
 	}
 	vk::PipelineStageFlags shader_write_stages = {};
-	if (HasShaderBufferWrites(state.vs_input_info.stage)) {
-		shader_write_stages |= mesh_active ? vk::PipelineStageFlagBits::eMeshShaderEXT
-		                                   : vk::PipelineStageFlagBits::eVertexShader;
+	for (const auto& stage: vertex_stages) {
+		if (HasShaderBufferWrites(stage.stage)) {
+			shader_write_stages |= ShaderPipelineStages(NativeShaderStage(stage.logical_stage));
+		}
 	}
 	if (state.ps_active && HasShaderBufferWrites(state.ps_input_info.stage)) {
 		shader_write_stages |= vk::PipelineStageFlagBits::eFragmentShader;
@@ -1210,8 +1205,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		m_context.GetCommandScheduler().EndRendering();
 		ShaderWriteBarrier(vk_buffer, shader_write_stages);
 	}
-	LogDrawPhase(draw.name, "DrawComplete");
-	if (set_auto_debug) {
+	LogDrawPhase(draw.Name(), "DrawComplete");
+	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u);
 	}
 }
@@ -1235,7 +1230,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		return;
 	}
 
-	if (ConsumeMetadataColorOperation(buffer)) {
+	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer)) {
 		ResetBindings();
 		return;
 	}
@@ -1245,7 +1240,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	}
 
 	if (graphics_debug_dump_enabled()) {
-		sh_print("GraphicsRenderDrawIndex():Shader:", sh_ctx);
+		LOGF("GraphicsRenderDrawIndex():Shader:\n");
 		uc_print("GraphicsRenderDrawIndex():UserConfig:", ucfg);
 		hw_print(buffer);
 
@@ -1270,77 +1265,61 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		return;
 	}
 
-	vk::IndexType index_type           = vk::IndexType::eUint16;
-	uint64_t      index_size           = 0;
-	bool          expand_index8_to_u16 = false;
-	const bool    primitive_restart =
-	    ResolvePrimitiveRestart(buffer, topology, args.index_type_and_size);
-
+	DrawIndexBufferSource index_source {};
+	index_source.address = reinterpret_cast<uint64_t>(args.index_addr);
 	switch (static_cast<Prospero::IndexType>(args.index_type_and_size)) {
 		case Prospero::IndexType::kIndex16:
-			index_type = vk::IndexType::eUint16;
-			index_size = 2 * static_cast<uint64_t>(args.index_count);
+			index_source.type               = vk::IndexType::eUint16;
+			index_source.guest_element_size = 2;
 			break;
 		case Prospero::IndexType::kIndex32:
-			index_type = vk::IndexType::eUint32;
-			index_size = 4 * static_cast<uint64_t>(args.index_count);
+			index_source.type               = vk::IndexType::eUint32;
+			index_source.guest_element_size = 4;
 			break;
-		// Some games use it - need vulkan extension
 		case Prospero::IndexType::kIndex8:
-			index_type           = vk::IndexType::eUint16;
-			index_size           = static_cast<uint64_t>(args.index_count);
-			expand_index8_to_u16 = true;
+			index_source.guest_element_size = 1;
 			break;
 		default: EXIT("unknown index_type_and_size: %u\n", args.index_type_and_size);
 	}
+	index_source.size = static_cast<uint64_t>(args.index_count) * index_source.guest_element_size;
+	const bool primitive_restart = ResolvePrimitiveRestart(buffer, index_source);
 
-	const DrawCallInfo    draw {"DrawIndex", CommandBufferDebugOp::DrawIndex, args.index_count,
-	                            args.instance_count, args.first_instance};
 	std::vector<uint16_t> expanded_indices;
-	if (expand_index8_to_u16) {
+	if (index_source.guest_element_size == 1) {
 		EXIT_NOT_IMPLEMENTED(args.index_addr == nullptr);
 		const auto* src = static_cast<const uint8_t*>(args.index_addr);
 		expanded_indices.resize(args.index_count);
 		for (uint32_t i = 0; i < args.index_count; i++) {
 			expanded_indices[i] = primitive_restart && src[i] == 0xffu ? 0xffffu : src[i];
 		}
+		index_source.host_data = expanded_indices.data();
+		index_source.size      = expanded_indices.size() * sizeof(uint16_t);
 	}
 
-	DrawIndexBufferSource index_source {};
-	index_source.address = reinterpret_cast<uint64_t>(args.index_addr);
-	index_source.host_data =
-	    expanded_indices.empty() ? nullptr : static_cast<const void*>(expanded_indices.data());
-	index_source.size =
-	    expanded_indices.empty() ? index_size : expanded_indices.size() * sizeof(uint16_t);
-	index_source.type = index_type;
-	index_source.guest_element_size = static_cast<uint32_t>(index_size / args.index_count);
-
+	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndex, args.index_count,
+	                        args.instance_count, args.first_instance};
 	DrawRenderState state {};
-	if (!PrepareDrawRenderState(submit_id, buffer, draw, args.render_target_slice_offset, true,
-	                            state)) {
+	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
 		ResetBindings();
 		return;
 	}
 
-	RefreshShaders(buffer, draw, true, state);
+	RefreshShaders(buffer, draw, state);
 
-	LogDrawStateIfNeeded(buffer, draw, state, true, false, args.index_type_and_size,
+	LogDrawStateIfNeeded(buffer, draw, state, args.index_type_and_size,
 	                     args.index_addr);
 
 	const bool indirect = args.offset_source == DrawOffsetSource::IndirectArgs;
-	const auto vertex_offset =
-	    indirect
-	        ? args.base_vertex
-	        : ResolveVertexOffset(ucfg.GetIndexOffset(), state.vs_input_info) + args.base_vertex;
+	const auto [vertex_offset, instance_offset] =
+	    indirect ? std::pair<int32_t, uint32_t> {0, args.first_instance}
+	             : ResolveDrawOffsets(ucfg.GetIndexOffset(), state.vertex_info[0]);
 
 	DrawEmitInfo emit {};
-	emit.indexed       = true;
-	emit.vertex_offset = vertex_offset;
-	emit.first_instance =
-	    indirect ? args.first_instance : ResolveInstanceOffset(state.vs_input_info);
+	emit.vertex_offset  = vertex_offset + args.base_vertex;
+	emit.first_instance = instance_offset;
 
 	ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source,
-	                    primitive_restart, true, true, false);
+	                    primitive_restart);
 	ResetBindings();
 }
 
@@ -1363,7 +1342,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		return;
 	}
 
-	if (ConsumeMetadataColorOperation(buffer)) {
+	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer)) {
 		ResetBindings();
 		return;
 	}
@@ -1373,7 +1352,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	}
 
 	if (graphics_debug_dump_enabled()) {
-		sh_print("GraphicsRenderDrawIndexAuto():Shader:", sh_ctx);
+		LOGF("GraphicsRenderDrawIndexAuto():Shader:\n");
 		uc_print("GraphicsRenderDrawIndexAuto():UserConfig:", ucfg);
 		hw_print(buffer);
 
@@ -1389,12 +1368,11 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 
 	hw_check(buffer);
 
-	const DrawCallInfo draw {"DrawIndexAuto", CommandBufferDebugOp::DrawIndexAuto,
+	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndexAuto,
 	                         args.vertex_count, args.instance_count, args.first_instance};
 
 	DrawRenderState state {};
-	if (!PrepareDrawRenderState(submit_id, buffer, draw, args.render_target_slice_offset, false,
-	                            state)) {
+	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
 		ResetBindings();
 		return;
 	}
@@ -1404,11 +1382,11 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		ResetBindings();
 		return;
 	}
-	RefreshShaders(buffer, draw, false, state);
+	RefreshShaders(buffer, draw, state);
 
-	const bool rect_list = topology == vk::PrimitiveTopology::ePatchList;
-	if (rect_list && state.vs_input_info.buffers_num == 0 &&
-	    state.vs_input_info.stage.program->param_export_mask == 0 &&
+	const bool rect_list = ucfg.GetPrimType() == Prospero::PrimitiveType::kRectList;
+	if (rect_list && state.vertex_info[0].buffers_num == 0 &&
+	    state.vertex_info[0].stage.program->param_export_mask == 0 &&
 	    state.ps_input_info.input_num != 0) {
 		if (graphics_debug_dump_enabled()) {
 			LOGF("DrawIndexAuto: skipping rect-list draw with no VS param exports and PS inputs: "
@@ -1420,28 +1398,22 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		return;
 	}
 
-	LogDrawStateIfNeeded(buffer, draw, state, false,
-	                     ucfg.GetPrimType() == Prospero::PrimitiveType::kRectListLegacy, 0,
-	                     nullptr);
+	LogDrawStateIfNeeded(buffer, draw, state, 0, nullptr);
 
 	const bool indirect = args.offset_source == DrawOffsetSource::IndirectArgs;
-	const auto vertex_offset =
-	    indirect ? static_cast<int32_t>(args.first_vertex)
-	             : ResolveVertexOffset(ucfg.GetIndexOffset(), state.vs_input_info) +
-	                   static_cast<int32_t>(args.first_vertex);
+	const auto [vertex_offset, instance_offset] =
+	    indirect ? std::pair<int32_t, uint32_t> {0, args.first_instance}
+	             : ResolveDrawOffsets(ucfg.GetIndexOffset(), state.vertex_info[0]);
 	DrawEmitInfo emit {};
-	emit.first_vertex = static_cast<uint32_t>(vertex_offset);
-	emit.first_instance =
-	    indirect ? args.first_instance : ResolveInstanceOffset(state.vs_input_info);
+	emit.first_vertex = static_cast<uint32_t>(vertex_offset + static_cast<int32_t>(args.first_vertex));
+	emit.first_instance = instance_offset;
 
 	DrawIndexBufferSource index_source {};
-	ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source, false, false,
-	                    false, true);
+	ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source, false);
 	ResetBindings();
 }
 
-bool RenderExecutor::ResolveColorTargets(uint64_t submit_id, CommandBuffer& buffer,
-                                         uint32_t render_target_slice_offset) {
+bool RenderExecutor::ResolveColorTargets(CommandBuffer& buffer, uint32_t render_target_slice_offset) {
 	const auto& hw = buffer.GetRegisters();
 	if (hw.GetColorControl().mode != 3) {
 		return false;
@@ -1455,8 +1427,8 @@ bool RenderExecutor::ResolveColorTargets(uint64_t submit_id, CommandBuffer& buff
 
 	RenderColorInfo src {};
 	RenderColorInfo dst {};
-	ResolveRenderColorTarget(submit_id, buffer, src, render_target_slice_offset, 0, true, true);
-	ResolveRenderColorTarget(submit_id, buffer, dst, render_target_slice_offset, 1, true, true);
+	ResolveRenderColorTarget(buffer, src, render_target_slice_offset, 0, true, true);
+	ResolveRenderColorTarget(buffer, dst, render_target_slice_offset, 1, true, true);
 	if (!src.image_id || !dst.image_id) {
 		return false;
 	}

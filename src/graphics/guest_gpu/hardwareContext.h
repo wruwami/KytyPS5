@@ -202,6 +202,13 @@ struct RenderControl {
 	uint8_t copy_sample              = 0;
 };
 
+struct DepthRenderOverride {
+	bool force_z_valid       = false;
+	bool force_z_dirty       = false;
+	bool force_stencil_valid = false;
+	bool force_stencil_dirty = false;
+};
+
 struct GdsOaCounter {
 	uint32_t counter = 0;
 	uint32_t address = 0;
@@ -491,7 +498,8 @@ struct LsStageRegisters {
 };
 
 struct HsStageRegisters {
-	uint64_t          data_addr = 0;
+	uint64_t          data_addr      = 0;
+	uint64_t          user_data_addr = 0;
 	HsShaderResource1 rsrc1;
 	HsShaderResource2 rsrc2;
 };
@@ -809,6 +817,12 @@ public:
 	void SetClipControl(const ClipControl& control) { m_clip_control = control; }
 	[[nodiscard]] const RenderControl& GetRenderControl() const { return m_render_control; }
 	void SetRenderControl(const RenderControl& control) { m_render_control = control; }
+	[[nodiscard]] const DepthRenderOverride& GetDepthRenderOverride() const {
+		return m_depth_render_override;
+	}
+	void SetDepthRenderOverride(const DepthRenderOverride& control) {
+		m_depth_render_override = control;
+	}
 	[[nodiscard]] const DepthControl& GetDepthControl() const { return m_depth_control; }
 	void SetDepthControl(const DepthControl& control) { m_depth_control = control; }
 	[[nodiscard]] const ModeControl& GetModeControl() const { return m_mode_control; }
@@ -904,15 +918,16 @@ private:
 
 	uint32_t m_shader_stages = 0;
 
-	DepthRenderTarget m_depth_render_target;
-	RenderControl     m_render_control;
-	DepthControl      m_depth_control;
-	StencilControl    m_stencil_control;
-	StencilMask       m_stencil_mask;
-	float             m_depth_clear_value   = 0.0f;
-	float             m_depth_bounds_min    = 0.0f;
-	float             m_depth_bounds_max    = 1.0f;
-	uint8_t           m_stencil_clear_value = 0;
+	DepthRenderTarget   m_depth_render_target;
+	RenderControl       m_render_control;
+	DepthRenderOverride m_depth_render_override;
+	DepthControl        m_depth_control;
+	StencilControl      m_stencil_control;
+	StencilMask         m_stencil_mask;
+	float               m_depth_clear_value   = 0.0f;
+	float               m_depth_bounds_min    = 0.0f;
+	float               m_depth_bounds_max    = 1.0f;
+	uint8_t             m_stencil_clear_value = 0;
 
 	ModeControl m_mode_control;
 	PolyOffset  m_poly_offset;
@@ -974,14 +989,14 @@ public:
 	void SetEsShaderBase(uint64_t addr) { m_vs.es_regs.data_addr = addr; }
 	void SetLsShaderBase(uint64_t addr) { m_vs.ls_regs.data_addr = addr; }
 	void SetHsShaderBase(uint64_t addr) { m_vs.hs_regs.data_addr = addr; }
+	void SetHsUserDataAddress(uint32_t word, uint32_t value) {
+		SetUserDataAddressWord(m_vs.hs_regs.user_data_addr, word, value);
+	}
 	void SetHsShaderResource1(const HsShaderResource1& rsrc1) { m_vs.hs_regs.rsrc1 = rsrc1; }
 	void SetHsShaderResource2(const HsShaderResource2& rsrc2) { m_vs.hs_regs.rsrc2 = rsrc2; }
 	void SetGsShaderBase(uint64_t addr) { m_vs.gs_regs.data_addr = addr; }
 	void SetGsUserDataAddress(uint32_t word, uint32_t value) {
-		const auto shift   = word * 32u;
-		auto&      address = m_vs.gs_regs.user_data_addr;
-		address = (address & ~(uint64_t {0xffffffffu} << shift)) |
-		          (static_cast<uint64_t>(value) << shift);
+		SetUserDataAddressWord(m_vs.gs_regs.user_data_addr, word, value);
 	}
 	void SetGsShaderResource1(const GsShaderResource1& rsrc1) { m_vs.gs_regs.rsrc1 = rsrc1; }
 	void SetGsShaderResource2(const GsShaderResource2& rsrc2) { m_vs.gs_regs.rsrc2 = rsrc2; }
@@ -1023,6 +1038,12 @@ public:
 	[[nodiscard]] const ComputeShaderInfo& GetCs() const { return m_cs; }
 
 private:
+	static void SetUserDataAddressWord(uint64_t& address, uint32_t word, uint32_t value) {
+		const auto shift = word * 32u;
+		address = (address & ~(uint64_t {0xffffffffu} << shift)) |
+		          (static_cast<uint64_t>(value) << shift);
+	}
+
 	VertexShaderInfo  m_vs;
 	PixelShaderInfo   m_ps;
 	ComputeShaderInfo m_cs;
