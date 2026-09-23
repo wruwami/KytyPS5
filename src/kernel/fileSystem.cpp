@@ -251,16 +251,15 @@ void FileDescriptors::CloseAll() {
 void MountPoints::Mount(const std::filesystem::path& folder, const std::string& point) {
 	Common::LockGuard lock(m_mutex);
 
-	auto folder_str = Common::FixDirectorySlash(Common::PathToGenericString(folder));
 	auto point_str  = Common::FixDirectorySlash(point);
 
 	Umount(point_str);
 
 	MountPair p;
-	p.dir   = folder_str;
+	p.dir   = folder;
 	p.point = point_str;
 
-	m_mount_pairs.push_back(p);
+	m_mount_pairs.push_back(std::move(p));
 }
 
 void MountPoints::Umount(const std::string& folder_or_point) {
@@ -270,7 +269,7 @@ void MountPoints::Umount(const std::string& folder_or_point) {
 
 	const auto it = std::find_if(
 	    m_mount_pairs.begin(), m_mount_pairs.end(), [&folder_or_point_str](const MountPair& p) {
-		    return Common::PathToGenericString(p.dir) == folder_or_point_str ||
+		    return Common::FixDirectorySlash(Common::PathToGenericString(p.dir)) == folder_or_point_str ||
 		           p.point == folder_or_point_str;
 	    });
 	if (it != m_mount_pairs.end()) {
@@ -334,23 +333,26 @@ std::filesystem::path MountPoints::ResolvePath(const std::string& mounted_name) 
 
 	// Match the entire guest path so a mount root works with or without a trailing slash.
 	const auto mounted_path = Common::FixDirectorySlash(mounted_name);
-	const auto it = std::find_if(
+	const auto it           = std::find_if(
 	    m_mount_pairs.begin(), m_mount_pairs.end(),
-	    [&mounted_path](const MountPair& p) { return Common::StartsWith(mounted_path, p.point); });
+	    [&mounted_path](const MountPair& p) { return mounted_path.starts_with(p.point); });
 	if (it != m_mount_pairs.end()) {
 		const auto& p = *it;
 		auto rel_path = Common::RemoveFirst(Common::FixFilenameSlash(mounted_name), p.point.size());
-		while (Common::StartsWith(rel_path, '/')) {
+		while (rel_path.starts_with('/')) {
 			rel_path = Common::RemoveFirst(rel_path, 1);
 		}
+
+		const auto native_rel_path = Common::PathFromUtf8(rel_path);
+
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		if (HasWindowsForbiddenFilenameCharacter(rel_path)) {
 			::printf("FileSystem: Windows-incompatible guest filename: %s\n",
 			         mounted_name.c_str());
 		}
-		return p.dir / rel_path;
+		return p.dir / native_rel_path;
 #else
-		return ResolvePathIgnoringCase(p.dir / rel_path);
+		return ResolvePathIgnoringCase(p.dir / native_rel_path);
 #endif
 	}
 

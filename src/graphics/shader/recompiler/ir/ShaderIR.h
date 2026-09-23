@@ -27,6 +27,7 @@ enum class ResourceKind {
 	ScalarBuffer,
 	ScalarAddress,
 	Buffer,
+	IndirectBuffer,
 	Flat,
 	Global,
 	Scratch,
@@ -171,6 +172,7 @@ enum class StageInputKind {
 	Layer,
 	SampleId,
 	BaryCoordSmooth,
+	BaryCoordSmoothCentroid,
 	BaryCoordNoPerspective,
 	WorkgroupId,
 	LocalInvocationId,
@@ -562,6 +564,7 @@ struct Program: ResourcePlan {
 };
 
 std::string ProgramToString(const Program& program);
+bool        HasShaderMemoryWrites(const Program& program);
 
 void  ValidateProgram(const Program& program, bool require_ssa);
 void  ResolveControlFlowIdentities(Program& program);

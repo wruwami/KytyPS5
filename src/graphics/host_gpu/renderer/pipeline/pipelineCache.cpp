@@ -89,12 +89,7 @@ template <typename... Args>
 void PipelineCacheLog(fmt::format_string<Args...> format, Args&&... args) {
 	auto message = fmt::format(format, std::forward<Args>(args)...);
 	message += '\n';
-	if (Log::GetDirection() != Log::Direction::Console) {
-		std::fwrite(message.data(), 1, message.size(), stdout);
-		std::fflush(stdout);
-	}
-	Log::Write(message);
-	Log::Flush();
+	Log::WriteToConsoleAndLog(message);
 }
 
 bool ReadShaderGuestMemory(void*, uint64_t address, uint32_t* value) {
@@ -253,12 +248,7 @@ struct PipelineCache::ProgramCache {
 		}
 		DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
 
-		vk::ShaderModuleCreateInfo create_info {};
-		create_info.codeSize    = result.spirv.size() * sizeof(uint32_t);
-		create_info.pCode       = result.spirv.data();
-		vk::ShaderModule module = nullptr;
-		RequireVulkanSuccess(device.createShaderModule(&create_info, nullptr, &module),
-		                     "create recompiled shader module");
+		const auto module = CompileSPV(result.spirv, device);
 		EXIT_IF(module == nullptr);
 		if (options.dump_ir) {
 			LOGF("%s SPIR-V words=%" PRIu64 " wave_size=%u\n", options.dump_label,
@@ -347,11 +337,12 @@ struct PipelineCache::ProgramCache {
 
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 			options.user_data_base = 8;
+			options.wave_size = input_info.wave_size;
 			if (stage == ShaderType::Mesh || stage == ShaderType::TessellationControl) {
 				options.user_data_base = 0;
 				options.wave_size = stage == ShaderType::Mesh ? input_info.mesh.wave_size : 64u;
 			}
-		} else if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+		} else {
 			options.wave_size = input_info.wave_size;
 		}
 		auto translated = ShaderRecompiler::TranslateProgram(params.code, options);
@@ -603,6 +594,21 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	ShaderParams pixel_params;
 	if (pixel_active) {
 		pixel_params = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
+		const auto& blend          = context.GetBlendControl(0);
+		const auto  is_dual_source = [](uint8_t factor) {
+			return factor >= static_cast<uint8_t>(Prospero::BlendFactor::kSrc1Color) &&
+			       factor <= static_cast<uint8_t>(Prospero::BlendFactor::kOneMinusSrc1Alpha);
+		};
+		pixel_info.dual_source_blending =
+		    blend.enable && !context.GetRenderTarget(0).info.blend_bypass &&
+		    (is_dual_source(blend.color_srcblend) || is_dual_source(blend.color_destblend) ||
+		     (blend.separate_alpha_blend &&
+		      (is_dual_source(blend.alpha_srcblend) || is_dual_source(blend.alpha_destblend))));
+		if (pixel_info.dual_source_blending) {
+			// MRT1 supplies a second blend source for the same render target as MRT0.
+			pixel_info.target_output_mode[1]    = pixel_info.target_output_mode[0];
+			pixel_info.target_export_mapping[1] = pixel_info.target_export_mapping[0];
+		}
 	}
 	if (context.GetClipControl().clip_disable) {
 		const auto& viewport = context.GetScreenViewport().viewports[0];
@@ -676,13 +682,16 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	key.ps_shader_id            = ps_id;
 	auto& static_params         = key.static_params;
 	auto& rendering             = key.rendering;
-	rendering.color_count       = color_count;
+	rendering.color_count       = 0;
 	uint32_t attachment_samples = 0;
 	for (uint32_t i = 0; i < color_count; i++) {
+		const auto slot = colors[i].target_slot;
+		EXIT_IF(slot >= RENDER_COLOR_ATTACHMENTS_MAX);
+		rendering.color_count = std::max(rendering.color_count, slot + 1);
 		EXIT_IF(!colors[i].image_id || colors[i].desc.view_info.format == vk::Format::eUndefined);
-		static_params.color_mask[i] = colors[i].export_mapping.ApplyMask(
+		static_params.color_mask[slot] = colors[i].export_mapping.ApplyMask(
 		    render_target_mask_slot(ctx.GetRenderTargetMask(), colors[i].target_slot));
-		rendering.color_formats[i] = colors[i].desc.view_info.format;
+		rendering.color_formats[slot] = colors[i].desc.view_info.format;
 		if (attachment_samples == 0) {
 			attachment_samples = colors[i].desc.info.samples;
 		} else if (attachment_samples != colors[i].desc.info.samples) {
@@ -691,14 +700,14 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 		}
 		const auto& rt                        = ctx.GetRenderTarget(colors[i].target_slot);
 		const auto& bc                        = ctx.GetBlendControl(colors[i].target_slot);
-		static_params.color_srcblend[i]       = bc.color_srcblend;
-		static_params.color_comb_fcn[i]       = bc.color_comb_fcn;
-		static_params.color_destblend[i]      = bc.color_destblend;
-		static_params.alpha_srcblend[i]       = bc.alpha_srcblend;
-		static_params.alpha_comb_fcn[i]       = bc.alpha_comb_fcn;
-		static_params.alpha_destblend[i]      = bc.alpha_destblend;
-		static_params.separate_alpha_blend[i] = bc.separate_alpha_blend;
-		static_params.blend_enable[i]         = bc.enable && !rt.info.blend_bypass;
+		static_params.color_srcblend[slot]       = bc.color_srcblend;
+		static_params.color_comb_fcn[slot]       = bc.color_comb_fcn;
+		static_params.color_destblend[slot]      = bc.color_destblend;
+		static_params.alpha_srcblend[slot]       = bc.alpha_srcblend;
+		static_params.alpha_comb_fcn[slot]       = bc.alpha_comb_fcn;
+		static_params.alpha_destblend[slot]      = bc.alpha_destblend;
+		static_params.separate_alpha_blend[slot] = bc.separate_alpha_blend;
+		static_params.blend_enable[slot]         = bc.enable && !rt.info.blend_bypass;
 	}
 	const bool with_depth =
 	    depth.desc.view_info.format != vk::Format::eUndefined && static_cast<bool>(depth.image_id);
@@ -747,11 +756,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	static_params.depth_bounds_test_enable = depth.depth_bounds_test_enable;
 	static_params.depth_min_bounds         = depth.depth_min_bounds;
 	static_params.depth_max_bounds         = depth.depth_max_bounds;
-	static_params.stencil_test_enable      = depth.stencil_test_enable;
-	static_params.stencil_front            = depth.stencil_static_front;
-	static_params.stencil_back             = depth.stencil_static_back;
-	const bool rect_list =
-	    command.GetUserConfig().GetPrimType() == Prospero::PrimitiveType::kRectList;
+	const bool rect_list = Prospero::IsRectList(command.GetUserConfig().GetPrimType());
 	static_params.cull_back  = !rect_list && mc.cull_back;
 	static_params.cull_front = !rect_list && mc.cull_front;
 	static_params.face       = mc.face;

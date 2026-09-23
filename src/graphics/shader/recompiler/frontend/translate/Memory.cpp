@@ -34,6 +34,7 @@ Decoder::Operand OffsetDecodedRegister(const Decoder::Operand& operand, uint32_t
 	result.negate_hi          = false;
 	result.absolute           = false;
 	result.dpp_ctrl           = 0;
+	result.dpp8               = false;
 	result.dpp_row_mask       = 0xf;
 	result.dpp_bank_mask      = 0xf;
 	result.explicit_sdwa_dst  = false;
@@ -1034,6 +1035,7 @@ bool Translator::EmitMemory(const Decoder::Instruction& inst) {
 		case Decoder::Opcode::IMAGE_STORE:
 		case Decoder::Opcode::IMAGE_STORE_MIP: return IMAGE_STORE(inst);
 		case Decoder::Opcode::IMAGE_SAMPLE: return IMAGE_SAMPLE(inst);
+		case Decoder::Opcode::IMAGE_GATHER4_L:
 		case Decoder::Opcode::IMAGE_GATHER4_LZ:
 		case Decoder::Opcode::IMAGE_GATHER4_C:
 		case Decoder::Opcode::IMAGE_GATHER4_C_LZ:

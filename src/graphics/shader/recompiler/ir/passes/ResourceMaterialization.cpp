@@ -357,16 +357,23 @@ struct SamplerPlan {
 };
 
 struct ImageRemap {
-	explicit ImageRemap(const ResourceSpecialization& specialization) {
-		for (const auto& image: specialization.images) {
-			indices.push_back(image.fmask ? UINT32_MAX : count++);
+	explicit ImageRemap(const ResourceSpecialization& specialization)
+	    : source_count(static_cast<uint32_t>(specialization.images.size())) {
+		EXIT_IF(specialization.images.size() > indices.size());
+		for (uint32_t index = 0; index < source_count; index++) {
+			indices[index] = specialization.images[index].fmask ? UINT32_MAX : count++;
 		}
+	}
+
+	uint32_t operator[](uint32_t index) const {
+		EXIT_IF(index >= source_count);
+		return indices[index];
 	}
 
 	template <typename T>
 	void Apply(std::vector<T>& images) const {
-		EXIT_IF(images.size() != indices.size());
-		for (uint32_t index = 0; index < indices.size(); index++) {
+		EXIT_IF(images.size() != source_count);
+		for (uint32_t index = 0; index < source_count; index++) {
 			if (indices[index] != UINT32_MAX && indices[index] != index) {
 				images[indices[index]] = std::move(images[index]);
 			}
@@ -374,8 +381,10 @@ struct ImageRemap {
 		images.resize(count);
 	}
 
-	std::vector<uint32_t> indices;
-	uint32_t              count = 0;
+private:
+	std::array<uint32_t, ShaderInfo::MaxImages> indices;
+	uint32_t                                    source_count;
+	uint32_t                                    count = 0;
 };
 
 template <typename Images>
@@ -647,7 +656,8 @@ bool BuildSamplerPlan(const ShaderInfo& base, const Images& images, SamplerPlan&
 }
 
 static std::vector<ResourceBlock> ResourceControlFlow(const Program& program) {
-	if (program.blocks.size() != program.block_info.size()) {
+	// Any shader write may alias a scalar predicate read, including on a later loop visit.
+	if (program.blocks.size() != program.block_info.size() || HasShaderMemoryWrites(program)) {
 		return {};
 	}
 	std::unordered_map<uint32_t, uint32_t> indices;
@@ -687,12 +697,6 @@ static std::vector<ResourceBlock> ResourceControlFlow(const Program& program) {
 			const auto op     = inst.GetOpcode();
 			const auto buffer = BufferAccessOf(op);
 			const auto image  = ImageOpcodeInfoOf(op);
-			// Any shader write may alias a scalar predicate read, including on a later loop visit.
-			if (buffer == BufferAccess::Write || buffer == BufferAccess::Atomic ||
-			    image.access == ImageAccess::Write || image.access == ImageAccess::Atomic ||
-			    AddressOpcodeInfoOf(op).access == AddressAccess::Write) {
-				return {};
-			}
 			if (buffer == BufferAccess::None && image.access == ImageAccess::None) {
 				continue;
 			}
@@ -1080,29 +1084,29 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 	for (auto* block: program.blocks) {
 		for (auto& inst: *block) {
 			if (inst.GetOpcode() == ValueOpcode::GetImageResource) {
-				inst.SetFlags(image_remap.indices.at(inst.Flags<uint32_t>()));
+				inst.SetFlags(image_remap[inst.Flags<uint32_t>()]);
 			}
 		}
 	}
 	for (auto& memory: memory_info) {
 		if (memory.kind == ResourceKind::Image && !memory.planning_only) {
-			memory.resource = image_remap.indices.at(memory.resource);
+			memory.resource = image_remap[memory.resource];
 		}
 	}
 	for (auto& buffer: buffers) {
 		if (buffer.image_alias != BufferResource::NoImageAlias) {
-			buffer.image_alias = image_remap.indices.at(buffer.image_alias);
+			buffer.image_alias = image_remap[buffer.image_alias];
 		}
 	}
 	for (auto& pair: sampled_pairs) {
-		pair.image = image_remap.indices.at(pair.image);
+		pair.image = image_remap[pair.image];
 	}
 	for (auto& image: images) {
 		if (image.indirect_root != ImageResource::NoIndirectImage) {
-			image.indirect_root = image_remap.indices.at(image.indirect_root);
+			image.indirect_root = image_remap[image.indirect_root];
 		}
 		for (auto& resource: image.indirect_resources) {
-			resource = image_remap.indices.at(resource);
+			resource = image_remap[resource];
 		}
 	}
 	image_remap.Apply(images);

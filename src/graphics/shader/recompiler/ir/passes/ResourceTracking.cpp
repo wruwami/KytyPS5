@@ -88,6 +88,7 @@ public:
 		m_info.samplers.clear();
 		m_info.sampled_pairs.clear();
 		m_info.uses_dma = false;
+		m_shader_writes = HasShaderMemoryWrites(program);
 	}
 
 	void Run() {
@@ -168,15 +169,85 @@ private:
 		std::abort();
 	}
 
+	Value LowerDescriptorPhi(Value value) {
+		value           = value.Resolve();
+		const auto* phi = value.TryInstruction();
+		if (m_shader_writes || phi == nullptr || phi->GetOpcode() != ValueOpcode::Phi ||
+		    phi->NumArgs() != 2u || phi->NumPhiBlocks() != 2u || phi->GetType() != Type::U32 ||
+		    m_program.blocks.size() != m_program.block_info.size()) {
+			return value;
+		}
+		for (const auto& [original, selected]: m_descriptor_selections) {
+			if (original == phi) {
+				return selected;
+			}
+		}
+		const auto* merge  = phi->Parent();
+		const auto* branch = phi->PhiBlock(0);
+		if (merge == nullptr || branch == nullptr || phi->PhiBlock(1) == nullptr ||
+		    branch == phi->PhiBlock(1)) {
+			return value;
+		}
+		if (branch->ImmSuccessors().size() != 2u) {
+			if (branch->ImmPredecessors().size() != 1u) {
+				return value;
+			}
+			branch = branch->ImmPredecessors()[0];
+		}
+		if (branch == merge || branch->ImmSuccessors().size() != 2u) {
+			return value;
+		}
+		std::array<uint32_t, 2> target_ids;
+		for (uint32_t arm = 0; arm < 2; arm++) {
+			const auto* incoming = phi->PhiBlock(arm);
+			if (incoming == merge ||
+			    (incoming != branch &&
+			     (incoming->ImmPredecessors().size() != 1u ||
+			      incoming->ImmPredecessors()[0] != branch ||
+			      incoming->ImmSuccessors().size() != 1u ||
+			      incoming->ImmSuccessors()[0] != merge))) {
+				return value;
+			}
+			const auto* target = incoming == branch ? merge : incoming;
+			const auto  it     = std::ranges::find(m_program.blocks, target);
+			if (it == m_program.blocks.end()) {
+				return value;
+			}
+			target_ids[arm] = m_program.block_info[it - m_program.blocks.begin()].id;
+		}
+		const auto branch_it = std::ranges::find(m_program.blocks, branch);
+		if (branch_it == m_program.blocks.end()) {
+			return value;
+		}
+		const auto& info = m_program.block_info[branch_it - m_program.blocks.begin()];
+		const auto& term = info.terminator;
+		if (term.kind != CFG::TerminatorKind::ConditionalBranch ||
+		    !((term.true_block == target_ids[0] && term.false_block == target_ids[1]) ||
+		      (term.false_block == target_ids[0] && term.true_block == target_ids[1])) ||
+		    !ValidateRuntimeValue(m_program, info.condition, RuntimeValueType::Integer) ||
+		    !ValidateRuntimeValue(m_program, phi->Arg(0)) ||
+		    !ValidateRuntimeValue(m_program, phi->Arg(1))) {
+			return value;
+		}
+		// Retain a host expression; replacing the GPU Phi would break SSA dominance.
+		const auto true_arg = term.true_block == target_ids[0] ? 0u : 1u;
+		auto&      selected = m_program.value_storage.emplace_back(ValueOpcode::SelectU32);
+		selected.SetArg(0, info.condition);
+		selected.SetArg(1, phi->Arg(true_arg));
+		selected.SetArg(2, phi->Arg(true_arg ^ 1u));
+		m_descriptor_selections.emplace_back(phi, Value(&selected));
+		return Value(&selected);
+	}
+
 	void MakeSource(const Inst& handle, uint32_t width, bool sampler, bool sample_adjust,
-	                DescriptorSource& descriptor, uint32_t pc) const {
+	                DescriptorSource& descriptor, uint32_t pc) {
 		if (handle.NumArgs() != width) {
 			Fail(pc, fmt::format("{} has {} descriptor dwords, expected {}",
 			                     ValueOpcodeName(handle.GetOpcode()), handle.NumArgs(), width));
 		}
 		descriptor.dword_count = width;
 		for (uint32_t i = 0; i < width; i++) {
-			descriptor.dwords[i] = handle.Arg(i).Resolve();
+			descriptor.dwords[i] = LowerDescriptorPhi(handle.Arg(i));
 		}
 		if (sample_adjust) {
 			descriptor.dwords[3] = CanonicalizeSampleAdjustDword3(descriptor.dwords[3]);
@@ -455,7 +526,7 @@ private:
 		}
 	}
 
-	void GetHandle(Value value, ValueOpcode expected, uint32_t width, uint32_t pc, Inst*& handle,
+	bool GetHandle(Value value, ValueOpcode expected, uint32_t width, uint32_t pc, Inst*& handle,
 	               uint32_t& source, bool sampler = false, bool sample_adjust = false) {
 		handle = value.Resolve().TryInstruction();
 		if (handle == nullptr || handle->GetOpcode() != expected) {
@@ -464,21 +535,17 @@ private:
 		DescriptorSource descriptor;
 		MakeSource(*handle, width, sampler, sample_adjust, descriptor, pc);
 		uint32_t bad_dword = 0;
-		if (expected == ValueOpcode::GetImageResource) {
-			for (; bad_dword < descriptor.dword_count; bad_dword++) {
-				const auto* value = descriptor.dwords[bad_dword].Resolve().TryInstruction();
-				if (value != nullptr && value->GetOpcode() == ValueOpcode::ReadConstBuffer) {
-					Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
-					                     ValueOpcodeName(expected), bad_dword));
-				}
-			}
-			bad_dword = 0;
-		}
 		if (!ValidateSource(descriptor, bad_dword)) {
+			if (expected == ValueOpcode::GetBufferResource &&
+			    std::all_of(descriptor.dwords.begin(), descriptor.dwords.begin() + width,
+			                [](Value word) { return word.Resolve().GetType() == Type::U32; })) {
+				return false;
+			}
 			Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
 			                     ValueOpcodeName(expected), bad_dword));
 		}
 		source = InternSource(descriptor);
+		return true;
 	}
 
 	void ValidateAddressHandle(Value value, uint32_t pc) const {
@@ -649,7 +716,18 @@ private:
 		uint32_t resource = 0;
 
 		if (buffer != BufferAccess::None) {
-			GetHandle(inst.Arg(0), ValueOpcode::GetBufferResource, 4, flags.pc, handle, source);
+			if (!GetHandle(inst.Arg(0), ValueOpcode::GetBufferResource, 4, flags.pc, handle,
+			               source)) {
+				if (memory.kind != ResourceKind::Buffer || memory.formatted || memory.typed ||
+				    (op != ValueOpcode::LoadBufferU32x2 && op != ValueOpcode::LoadBufferU32x4)) {
+					Fail(flags.pc,
+					     "buffer descriptor is not a valid runtime value; GPU-selected access "
+					     "requires a raw DWORD x2/x4 load");
+				}
+				m_program.memory_info[flags.index].kind = ResourceKind::IndirectBuffer;
+				m_info.uses_dma                         = true;
+				return;
+			}
 			resource = AddBuffer(source, memory, op, flags.pc);
 			if (resource == UINT32_MAX) {
 				Fail(flags.pc, "buffer resource limit exceeded");
@@ -744,12 +822,14 @@ private:
 		}
 	}
 
-	Program&                       m_program;
-	ShaderInfo                     m_info;
-	std::vector<DescriptorSource>  m_sources;
-	std::vector<HandlePatch>       m_handle_patches;
-	std::vector<MemoryPatch>       m_memory_patches;
-	std::vector<IndirectImagePlan> m_indirect_images;
+	Program&                                   m_program;
+	ShaderInfo                                 m_info;
+	std::vector<DescriptorSource>              m_sources;
+	std::vector<HandlePatch>                   m_handle_patches;
+	std::vector<MemoryPatch>                   m_memory_patches;
+	std::vector<IndirectImagePlan>             m_indirect_images;
+	std::vector<std::pair<const Inst*, Value>> m_descriptor_selections;
+	bool                                       m_shader_writes = false;
 };
 
 } // namespace

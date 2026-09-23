@@ -14,10 +14,6 @@
 namespace Libs::Graphics::ShaderRecompiler::Decoder {
 namespace {
 
-uint32_t FloatBits(float value) {
-	return std::bit_cast<uint32_t>(value);
-}
-
 bool HasLiteral(const Instruction& inst) {
 	return inst.src0.kind == OperandKind::LiteralConstant ||
 	       inst.src1.kind == OperandKind::LiteralConstant ||
@@ -144,6 +140,7 @@ std::string FormatMimg(const Instruction& inst) {
 	}
 	switch (inst.opcode) {
 		case Opcode::IMAGE_SAMPLE:
+		case Opcode::IMAGE_GATHER4_L:
 		case Opcode::IMAGE_GATHER4_LZ:
 		case Opcode::IMAGE_GATHER4_C:
 		case Opcode::IMAGE_GATHER4_C_LZ:
@@ -187,6 +184,8 @@ std::string FormatExp(const Instruction& inst) {
 
 bool IsConditionalBranch(Opcode opcode) {
 	switch (opcode) {
+		// DevKit NGG should be disabled.
+		case Opcode::S_CBRANCH_CDBGSYS: return false;
 		case Opcode::S_CBRANCH_SCC0:
 		case Opcode::S_CBRANCH_SCC1:
 		case Opcode::S_CBRANCH_VCCZ:
@@ -239,7 +238,7 @@ void DecodeScalarSource(uint32_t code, uint32_t pc, Operand& operand) {
 	if (code >= 240u && code <= 247u) {
 		constexpr float values[] = {0.5f, -0.5f, 1.0f, -1.0f, 2.0f, -2.0f, 4.0f, -4.0f};
 		operand.kind             = OperandKind::FloatInlineConstant;
-		operand.value            = FloatBits(values[code - 240u]);
+		operand.value            = std::bit_cast<uint32_t>(values[code - 240u]);
 		return;
 	}
 	if (code >= 256u && code <= 511u) {
@@ -257,7 +256,7 @@ void DecodeScalarSource(uint32_t code, uint32_t pc, Operand& operand) {
 		case 239u: operand.kind = OperandKind::PopsExitingWaveId; return;
 		case 248u:
 			operand.kind      = OperandKind::FloatInlineConstant;
-			operand.value = FloatBits(0.15915494309189535f);
+			operand.value = std::bit_cast<uint32_t>(0.15915494309189535f);
 			return;
 		case 251u: operand.kind = OperandKind::VccZ; return;
 		case 252u: operand.kind = OperandKind::ExecZ; return;
@@ -473,8 +472,9 @@ std::string OperandToString(const Operand& operand) {
 		text += ".clamp";
 	}
 	if (operand.dpp) {
-		text += fmt::format(".dpp(ctrl=0x{:x},fi={},bc={})", operand.dpp_ctrl,
-		                    operand.dpp_fetch_inactive ? 1u : 0u, operand.dpp_bound_ctrl ? 1u : 0u);
+		text += fmt::format(".{}(ctrl=0x{:x},fi={},bc={})", operand.dpp8 ? "dpp8" : "dpp",
+		                    operand.dpp_ctrl, operand.dpp_fetch_inactive ? 1u : 0u,
+		                    operand.dpp_bound_ctrl ? 1u : 0u);
 	}
 	return text;
 }
@@ -554,6 +554,7 @@ std::string InstructionToString(const Instruction& inst) {
 		case Opcode::S_CBRANCH_VCCNZ:
 		case Opcode::S_CBRANCH_EXECZ:
 		case Opcode::S_CBRANCH_EXECNZ:
+		case Opcode::S_CBRANCH_CDBGSYS:
 			return WithUnsupportedReason(inst, fmt::format("0x{:08x}: {} 0x{:08x}", inst.pc,
 			                                               magic_enum::enum_name(inst.opcode),
 			                                               inst.branch_target));
@@ -577,6 +578,7 @@ std::string InstructionToString(const Instruction& inst) {
 		case Opcode::IMAGE_LOAD_MIP:
 		case Opcode::IMAGE_GET_RESINFO:
 		case Opcode::IMAGE_GET_LOD:
+		case Opcode::IMAGE_GATHER4_L:
 		case Opcode::IMAGE_GATHER4_LZ:
 		case Opcode::IMAGE_GATHER4_C:
 		case Opcode::IMAGE_GATHER4_C_LZ:

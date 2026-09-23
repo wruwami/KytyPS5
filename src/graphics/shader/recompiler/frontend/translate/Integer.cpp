@@ -22,6 +22,18 @@ bool Translator::Integer16Binary(const Decoder::Instruction& inst, IR::ValueOpco
 	return true;
 }
 
+bool Translator::V_MAD_I16(const Decoder::Instruction& inst) {
+	const auto lhs    = ReadU16AsU32(inst.src0, true);
+	const auto rhs    = ReadU16AsU32(inst.src1, true);
+	auto       result = ir.IAdd(ir.IMul(lhs, rhs), ReadU16AsU32(inst.src2, true));
+	if (inst.dst.clamp) {
+		result = IR::U32(ir.Emit(IR::ValueOpcode::SMax32, {result, IR::Value(0xffff8000u)}));
+		result = IR::U32(ir.Emit(IR::ValueOpcode::SMin32, {result, IR::Value(0x7fffu)}));
+	}
+	Write16Bits(DestinationOperand(inst), ir.BitwiseAnd(result, IR::U32(IR::Value(0xffffu))));
+	return true;
+}
+
 bool Translator::V_MED3_I16(const Decoder::Instruction& inst) {
 	const auto result = IR::U32(ir.Emit(
 	    IR::ValueOpcode::SMedTri32, {ReadU16AsU32(inst.src0, true), ReadU16AsU32(inst.src1, true),
@@ -165,6 +177,21 @@ bool Translator::SimpleInteger(const Decoder::Instruction& inst, IR::ValueOpcode
 			ir.SetScc(ir.INotEqual(IR::U32(result), IR::U32(IR::Value(0u))));
 		}
 	}
+	return true;
+}
+
+bool Translator::S_ASHR_I64(const Decoder::Instruction& inst) {
+	// Signed 64-bit sources sign-extend literals; generic B64 operands zero-extend them.
+	const auto source =
+	    inst.src0.kind == Decoder::OperandKind::LiteralConstant
+	        ? ir.ConstructU64(
+	              ReadU32(inst.src0),
+	              IR::U32(IR::Value((inst.src0.value & 0x80000000u) ? 0xffffffffu : 0u)))
+	        : ReadU64(inst.src0);
+	const auto result =
+	    ir.Emit(IR::ValueOpcode::ShiftRightArithmetic64, {source, ReadU32(inst.src1)});
+	WriteOperand(inst.dst, result);
+	ir.SetScc(IR::U1(ir.Emit(IR::ValueOpcode::INotEqual64, {result, IR::Value(uint64_t {0})})));
 	return true;
 }
 
@@ -476,6 +503,18 @@ bool Translator::S_BITCMP_B32(const Decoder::Instruction& inst, bool expected) {
 	const auto offset = ir.BitwiseAnd(ReadU32(inst.src1), IR::U32(IR::Value(31u)));
 	const auto bit =
 	    IR::U32(ir.Emit(IR::ValueOpcode::BitFieldUExtract, {value, offset, IR::Value(1u)}));
+	WriteCompareResult(inst.dst, ir.IEqual(bit, IR::U32(IR::Value(expected ? 1u : 0u))));
+	return true;
+}
+
+bool Translator::S_BITCMP_B64(const Decoder::Instruction& inst, bool expected) {
+	const auto value    = ReadU32Pair(inst.src0);
+	const auto offset   = ir.BitwiseAnd(ReadU32(inst.src1), IR::U32(IR::Value(63u)));
+	const auto word_bit = ir.BitwiseAnd(offset, IR::U32(IR::Value(31u)));
+	const auto word =
+	    ir.Select(ir.ULessThan(offset, IR::U32(IR::Value(32u))), value[0], value[1]);
+	const auto bit =
+	    IR::U32(ir.Emit(IR::ValueOpcode::BitFieldUExtract, {word, word_bit, IR::Value(1u)}));
 	WriteCompareResult(inst.dst, ir.IEqual(bit, IR::U32(IR::Value(expected ? 1u : 0u))));
 	return true;
 }

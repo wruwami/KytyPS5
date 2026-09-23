@@ -12,6 +12,22 @@ endif()
 
 project(Kyty)
 
+find_program(SCCACHE_PROGRAM sccache)
+find_program(CCACHE_PROGRAM ccache)
+
+foreach(lang IN ITEMS C CXX)
+    # An explicitly empty launcher disables caching for this language.
+    if(NOT DEFINED CMAKE_${lang}_COMPILER_LAUNCHER)
+        if(SCCACHE_PROGRAM)
+            set(CMAKE_${lang}_COMPILER_LAUNCHER "${SCCACHE_PROGRAM}")
+            message(STATUS "sccache enabled for ${lang}: ${SCCACHE_PROGRAM}")
+        elseif(CCACHE_PROGRAM)
+            set(CMAKE_${lang}_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+            message(STATUS "ccache enabled for ${lang}: ${CCACHE_PROGRAM}")
+        endif()
+    endif()
+endforeach()
+
 set(KYTY_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(KYTY_TESTS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests")
 set(KYTY_THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty")
@@ -317,24 +333,10 @@ endif()
 
 set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL2-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak)
 
-# Linux system libraries required by the static FFmpeg archive.
+# Linux system libraries.
 if(LINUX)
 	find_package(Threads REQUIRED)
 	list(APPEND kyty_emulator_link_libraries m ${CMAKE_DL_LIBS} Threads::Threads)
-
-	# Optional FFmpeg dependencies.
-	find_package(ZLIB)
-	if(ZLIB_FOUND)
-		list(APPEND kyty_emulator_link_libraries ZLIB::ZLIB)
-	endif()
-	find_library(KYTY_BZ2_LIBRARY bz2)
-	if(KYTY_BZ2_LIBRARY)
-		list(APPEND kyty_emulator_link_libraries ${KYTY_BZ2_LIBRARY})
-	endif()
-	find_library(KYTY_LZMA_LIBRARY lzma)
-	if(KYTY_LZMA_LIBRARY)
-		list(APPEND kyty_emulator_link_libraries ${KYTY_LZMA_LIBRARY})
-	endif()
 endif()
 
 set(inc_headers
@@ -469,6 +471,12 @@ add_executable(audio_out2_port_tests EXCLUDE_FROM_ALL
 target_link_libraries(audio_out2_port_tests common fmt::fmt)
 target_include_directories(audio_out2_port_tests PRIVATE ${inc_headers})
 
+add_executable(save_data_memory_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/SaveDataMemoryTests.cpp"
+)
+target_link_libraries(save_data_memory_tests common fmt::fmt)
+target_include_directories(save_data_memory_tests PRIVATE ${inc_headers})
+
 add_executable(event_queue_lifetime_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/EventQueueLifetimeTests.cpp"
 	"${KYTY_SOURCE_DIR}/kernel/eventQueue.cpp"
@@ -554,6 +562,7 @@ if(BUILD_TESTING)
 	add_test(NAME kernel_file_system COMMAND $<TARGET_FILE:kernel_file_system_tests>)
 	add_test(NAME sync_on_address COMMAND $<TARGET_FILE:sync_on_address_tests>)
 	add_test(NAME audio_out2_port COMMAND $<TARGET_FILE:audio_out2_port_tests>)
+	add_test(NAME save_data_memory COMMAND $<TARGET_FILE:save_data_memory_tests>)
 	add_test(NAME shader_recompiler_compute COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
 	add_test(NAME shader_recompiler_alignbyte
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --alignbyte-only)
@@ -622,6 +631,21 @@ if(BUILD_TESTING)
 	)
 endif()
 
+# Test Darwin signal-context restoration for SSE4a instructions.
+if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
+		(NOT CMAKE_OSX_ARCHITECTURES AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")))
+	add_executable(macos_sse4a_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/macosSse4aTests.cpp"
+		"${KYTY_SOURCE_DIR}/loader/x64InstructionEmulator.cpp"
+	)
+	target_link_libraries(macos_sse4a_tests common fmt::fmt Zydis::Zydis)
+	target_include_directories(macos_sse4a_tests PRIVATE ${inc_headers})
+	if(BUILD_TESTING)
+		add_test(NAME macos_sse4a COMMAND $<TARGET_FILE:macos_sse4a_tests>)
+		set_tests_properties(macos_sse4a PROPERTIES TIMEOUT 15)
+		add_dependencies(kyty_tests macos_sse4a_tests)
+	endif()
+endif()
 
 add_executable(kyty_emulator "${KYTY_SOURCE_DIR}/main.cpp" ${kyty_emulator_src})
 configure_macos_guest_address_space(kyty_emulator)
@@ -662,6 +686,12 @@ if(KYTY_CLANG_CL)
 	add_custom_command(TARGET kyty_emulator POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KYTY_THIRD_PARTY_DIR}/winpthread/bin/libwinpthread-1.dll" $<TARGET_FILE_DIR:kyty_emulator>/libwinpthread-1.dll)
 elseif(WIN32 OR LINUX)
 	set_target_properties(kyty_emulator PROPERTIES LINK_FLAGS "${KYTY_LD_OPTIONS} -Wl,-Map=${KYTY_EMULATOR_MAP_LINK_PATH}")
+endif()
+
+if(LINUX)
+    target_link_options(kyty_emulator PRIVATE
+        $<$<CONFIG:Release>:-Wl,--strip-all>
+    )
 endif()
 
 if(APPLE)
