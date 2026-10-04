@@ -694,6 +694,271 @@ void TestUndefinedRuntimeValueFails() {
         "undefined typed descriptor source was accepted");
 }
 
+void TestConstantPropagationArithmeticAndBitwise() {
+  Fixture fixture;
+  // Identity cases need a non-immediate operand; otherwise the constant fold
+  // fires first and the identity rule under test is never reached.
+  const auto sym32 = fixture.Emit(ValueOpcode::UndefU32);
+  const auto sym64 = fixture.Emit(ValueOpcode::UndefU64);
+  // ISub32
+  const auto sub32 = fixture.Emit(ValueOpcode::ISub32, {Value(50u), Value(8u)});
+  const auto sub32_id = fixture.Emit(ValueOpcode::ISub32, {sym32, Value(0u)});
+  // ISub64
+  const auto sub64 = fixture.Emit(ValueOpcode::ISub64, {Value(uint64_t{100ull}), Value(uint64_t{42ull})});
+  const auto sub64_id = fixture.Emit(ValueOpcode::ISub64, {sym64, Value(uint64_t{0ull})});
+  // IMul64
+  const auto mul64 = fixture.Emit(ValueOpcode::IMul64, {Value(uint64_t{6ull}), Value(uint64_t{7ull})});
+  const auto mul64_id = fixture.Emit(ValueOpcode::IMul64, {sym64, Value(uint64_t{1ull})});
+  // UDiv32
+  const auto div32 = fixture.Emit(ValueOpcode::UDiv32, {Value(84u), Value(2u)});
+  const auto div32_id = fixture.Emit(ValueOpcode::UDiv32, {Value(42u), Value(1u)});
+  // SMulHi / UMulHi
+  const auto smulhi = fixture.Emit(ValueOpcode::SMulHi, {Value(0x10000000u), Value(0x10000000u)});
+  const auto umulhi = fixture.Emit(ValueOpcode::UMulHi, {Value(0x80000000u), Value(2u)});
+  // IAbs32
+  const auto abs_pos = fixture.Emit(ValueOpcode::IAbs32, {Value(42u)});
+  const auto abs_neg = fixture.Emit(ValueOpcode::IAbs32, {Value(0x80000005u)});
+  // Shifts
+  const auto shl32 = fixture.Emit(ValueOpcode::ShiftLeftLogical32, {Value(1u), Value(4u)});
+  const auto shl32_id = fixture.Emit(ValueOpcode::ShiftLeftLogical32, {sym32, Value(0u)});
+  const auto shr32 = fixture.Emit(ValueOpcode::ShiftRightLogical32, {Value(32u), Value(2u)});
+  const auto shr32_id = fixture.Emit(ValueOpcode::ShiftRightLogical32, {sym32, Value(0u)});
+  const auto sra32 = fixture.Emit(ValueOpcode::ShiftRightArithmetic32, {Value(static_cast<uint32_t>(-16)), Value(2u)});
+  const auto shl64 = fixture.Emit(ValueOpcode::ShiftLeftLogical64, {Value(uint64_t{1ull}), Value(40u)});
+  const auto shl64_id = fixture.Emit(ValueOpcode::ShiftLeftLogical64, {sym64, Value(0u)});
+  const auto shr64 = fixture.Emit(ValueOpcode::ShiftRightLogical64, {Value(uint64_t{0x10000000000ull}), Value(40u)});
+  const auto shr64_id = fixture.Emit(ValueOpcode::ShiftRightLogical64, {sym64, Value(0u)});
+  const auto sra64 = fixture.Emit(ValueOpcode::ShiftRightArithmetic64, {Value(static_cast<uint64_t>(-16ll)), Value(2u)});
+  // WqmU64
+  const auto wqm = fixture.Emit(ValueOpcode::WqmU64, {Value(uint64_t{1ull})});
+  // BitCount32 / BitCount64
+  const auto pop32 = fixture.Emit(ValueOpcode::BitCount32, {Value(0x10101010u)});
+  const auto pop64 = fixture.Emit(ValueOpcode::BitCount64, {Value(uint64_t{0x1010101010101010ull})});
+  // SMin32 / SMax32 / UMin32 / UMax32
+  const auto smin = fixture.Emit(ValueOpcode::SMin32, {Value(static_cast<uint32_t>(-10)), Value(5u)});
+  const auto smax = fixture.Emit(ValueOpcode::SMax32, {Value(static_cast<uint32_t>(-10)), Value(5u)});
+  const auto umin = fixture.Emit(ValueOpcode::UMin32, {Value(10u), Value(50u)});
+  const auto umax = fixture.Emit(ValueOpcode::UMax32, {Value(10u), Value(50u)});
+  // BitwiseAnd64
+  const auto and64 = fixture.Emit(ValueOpcode::BitwiseAnd64, {Value(uint64_t{0xff00ff00ff00ff00ull}), Value(uint64_t{0x0f0f0f0f0f0f0f0full})});
+  const auto and64_id = fixture.Emit(ValueOpcode::BitwiseAnd64, {sym64, Value(UINT64_MAX)});
+  // BitwiseNot32
+  const auto not32 = fixture.Emit(ValueOpcode::BitwiseNot32, {Value(0x0000ffffu)});
+
+  ConstantPropagationPass(fixture.program.blocks);
+
+  Check(sub32.Resolve() == Value(42u), "ISub32 constant fold failed");
+  Check(sub32_id.Resolve() == sym32, "ISub32 zero rhs identity failed");
+  Check(sub64.Resolve() == Value(uint64_t{58ull}), "ISub64 constant fold failed");
+  Check(sub64_id.Resolve() == sym64, "ISub64 zero rhs identity failed");
+  Check(mul64.Resolve() == Value(uint64_t{42ull}), "IMul64 constant fold failed");
+  Check(mul64_id.Resolve() == sym64, "IMul64 one rhs identity failed");
+  Check(div32.Resolve() == Value(42u), "UDiv32 constant fold failed");
+  Check(div32_id.Resolve() == Value(42u), "UDiv32 one rhs identity failed");
+  Check(smulhi.Resolve() == Value(0x1000000u), "SMulHi constant fold failed");
+  Check(umulhi.Resolve() == Value(1u), "UMulHi constant fold failed");
+  Check(abs_pos.Resolve() == Value(42u), "IAbs32 positive fold failed");
+  Check(abs_neg.Resolve() == Value(0x7ffffffbu), "IAbs32 negative fold failed");
+  Check(shl32.Resolve() == Value(16u), "ShiftLeftLogical32 fold failed");
+  Check(shl32_id.Resolve() == sym32, "ShiftLeftLogical32 zero shift identity failed");
+  Check(shr32.Resolve() == Value(8u), "ShiftRightLogical32 fold failed");
+  Check(shr32_id.Resolve() == sym32, "ShiftRightLogical32 zero shift identity failed");
+  Check(sra32.Resolve() == Value(static_cast<uint32_t>(-4)), "ShiftRightArithmetic32 fold failed");
+  Check(shl64.Resolve() == Value(uint64_t{0x10000000000ull}), "ShiftLeftLogical64 fold failed");
+  Check(shl64_id.Resolve() == sym64, "ShiftLeftLogical64 zero shift identity failed");
+  Check(shr64.Resolve() == Value(uint64_t{1ull}), "ShiftRightLogical64 fold failed");
+  Check(shr64_id.Resolve() == sym64, "ShiftRightLogical64 zero shift identity failed");
+  Check(sra64.Resolve() == Value(static_cast<uint64_t>(-4ll)), "ShiftRightArithmetic64 fold failed");
+  Check(wqm.Resolve() == Value(uint64_t{0xfull}), "WqmU64 fold failed");
+  Check(pop32.Resolve() == Value(4u), "BitCount32 fold failed");
+  Check(pop64.Resolve() == Value(8u), "BitCount64 fold failed");
+  Check(smin.Resolve() == Value(static_cast<uint32_t>(-10)), "SMin32 fold failed");
+  Check(smax.Resolve() == Value(5u), "SMax32 fold failed");
+  Check(umin.Resolve() == Value(10u), "UMin32 fold failed");
+  Check(umax.Resolve() == Value(50u), "UMax32 fold failed");
+  Check(and64.Resolve() == Value(uint64_t{0x0f000f000f000f00ull}), "BitwiseAnd64 fold failed");
+  Check(and64_id.Resolve() == sym64, "BitwiseAnd64 identity failed");
+  Check(not32.Resolve() == Value(0xffff0000u), "BitwiseNot32 fold failed");
+}
+
+void TestConstantPropagationComparisonsAndLogical() {
+  Fixture fixture;
+  // 32-bit comparison
+  const auto ult = fixture.Emit(ValueOpcode::ULessThan32, {Value(10u), Value(20u)});
+  const auto ulte = fixture.Emit(ValueOpcode::ULessThanEqual32, {Value(10u), Value(10u)});
+  const auto ugt = fixture.Emit(ValueOpcode::UGreaterThan32, {Value(20u), Value(10u)});
+  const auto ugte = fixture.Emit(ValueOpcode::UGreaterThanEqual32, {Value(10u), Value(10u)});
+  const auto slt = fixture.Emit(ValueOpcode::SLessThan32, {Value(static_cast<uint32_t>(-5)), Value(5u)});
+  const auto slte = fixture.Emit(ValueOpcode::SLessThanEqual32, {Value(5u), Value(5u)});
+  const auto sgt = fixture.Emit(ValueOpcode::SGreaterThan32, {Value(5u), Value(static_cast<uint32_t>(-5))});
+  const auto sgte = fixture.Emit(ValueOpcode::SGreaterThanEqual32, {Value(5u), Value(5u)});
+  const auto ieq32 = fixture.Emit(ValueOpcode::IEqual32, {Value(42u), Value(42u)});
+  const auto ineq32 = fixture.Emit(ValueOpcode::INotEqual32, {Value(42u), Value(42u)});
+
+  // 64-bit comparison
+  const auto ieq64 = fixture.Emit(ValueOpcode::IEqual64, {Value(uint64_t{100ull}), Value(uint64_t{100ull})});
+  const auto ineq64 = fixture.Emit(ValueOpcode::INotEqual64, {Value(uint64_t{100ull}), Value(uint64_t{200ull})});
+  const auto ult64 = fixture.Emit(ValueOpcode::ULessThan64, {Value(uint64_t{100ull}), Value(uint64_t{200ull})});
+  const auto ugt64 = fixture.Emit(ValueOpcode::UGreaterThan64, {Value(uint64_t{200ull}), Value(uint64_t{100ull})});
+  const auto slt64 = fixture.Emit(ValueOpcode::SLessThan64, {Value(static_cast<uint64_t>(-10ll)), Value(uint64_t{10ull})});
+
+  // Logical operations
+  const auto land_const = fixture.Emit(ValueOpcode::LogicalAnd, {Value(true), Value(false)});
+  const auto lor_const = fixture.Emit(ValueOpcode::LogicalOr, {Value(true), Value(false)});
+  const auto lxor_const = fixture.Emit(ValueOpcode::LogicalXor, {Value(true), Value(false)});
+  const auto lnot_true = fixture.Emit(ValueOpcode::LogicalNot, {Value(true)});
+  const auto lnot_false = fixture.Emit(ValueOpcode::LogicalNot, {Value(false)});
+
+  // Identity / short-circuit with symbolic argument
+  const auto sym_cond = fixture.Emit(ValueOpcode::UndefU1);
+  const auto land_short = fixture.Emit(ValueOpcode::LogicalAnd, {Value(false), sym_cond});
+  const auto land_id = fixture.Emit(ValueOpcode::LogicalAnd, {Value(true), sym_cond});
+  const auto lor_short = fixture.Emit(ValueOpcode::LogicalOr, {Value(true), sym_cond});
+  const auto lor_id = fixture.Emit(ValueOpcode::LogicalOr, {Value(false), sym_cond});
+  const auto lxor_id = fixture.Emit(ValueOpcode::LogicalXor, {Value(false), sym_cond});
+  // Double logical not
+  const auto lnot1 = fixture.Emit(ValueOpcode::LogicalNot, {sym_cond});
+  const auto lnot2 = fixture.Emit(ValueOpcode::LogicalNot, {lnot1});
+
+  ConstantPropagationPass(fixture.program.blocks);
+
+  Check(ult.Resolve() == Value(true), "ULessThan32 fold failed");
+  Check(ulte.Resolve() == Value(true), "ULessThanEqual32 fold failed");
+  Check(ugt.Resolve() == Value(true), "UGreaterThan32 fold failed");
+  Check(ugte.Resolve() == Value(true), "UGreaterThanEqual32 fold failed");
+  Check(slt.Resolve() == Value(true), "SLessThan32 fold failed");
+  Check(slte.Resolve() == Value(true), "SLessThanEqual32 fold failed");
+  Check(sgt.Resolve() == Value(true), "SGreaterThan32 fold failed");
+  Check(sgte.Resolve() == Value(true), "SGreaterThanEqual32 fold failed");
+  Check(ieq32.Resolve() == Value(true), "IEqual32 fold failed");
+  Check(ineq32.Resolve() == Value(false), "INotEqual32 fold failed");
+
+  Check(ieq64.Resolve() == Value(true), "IEqual64 fold failed");
+  Check(ineq64.Resolve() == Value(true), "INotEqual64 fold failed");
+  Check(ult64.Resolve() == Value(true), "ULessThan64 fold failed");
+  Check(ugt64.Resolve() == Value(true), "UGreaterThan64 fold failed");
+  Check(slt64.Resolve() == Value(true), "SLessThan64 fold failed");
+
+  Check(land_const.Resolve() == Value(false), "LogicalAnd const fold failed");
+  Check(lor_const.Resolve() == Value(true), "LogicalOr const fold failed");
+  Check(lxor_const.Resolve() == Value(true), "LogicalXor const fold failed");
+  Check(lnot_true.Resolve() == Value(false), "LogicalNot true fold failed");
+  Check(lnot_false.Resolve() == Value(true), "LogicalNot false fold failed");
+
+  Check(land_short.Resolve() == Value(false), "LogicalAnd short-circuit failed");
+  Check(land_id.Resolve() == sym_cond, "LogicalAnd identity failed");
+  Check(lor_short.Resolve() == Value(true), "LogicalOr short-circuit failed");
+  Check(lor_id.Resolve() == sym_cond, "LogicalOr identity failed");
+  Check(lxor_id.Resolve() == sym_cond, "LogicalXor identity failed");
+  Check(lnot2.Resolve() == sym_cond, "LogicalNot cancellation failed");
+}
+
+void TestConstantPropagationConversionsAndCasts() {
+  Fixture fixture;
+  // Select
+  const auto sel_t = fixture.Emit(ValueOpcode::SelectU32, {Value(true), Value(42u), Value(99u)});
+  const auto sel_f = fixture.Emit(ValueOpcode::SelectU32, {Value(false), Value(42u), Value(99u)});
+  const auto undef_cond = fixture.Emit(ValueOpcode::UndefU1);
+  const auto sel_same = fixture.Emit(ValueOpcode::SelectU32, {undef_cond, Value(77u), Value(77u)});
+
+  // BitCast F32 <-> U32
+  const auto cast_u_f = fixture.Emit(ValueOpcode::BitCastU32F32, {Value::F32(1.0f)});
+  const auto cast_f_u = fixture.Emit(ValueOpcode::BitCastF32U32, {Value(0x3f800000u)});
+  // BitCast cancellation
+  const auto undef_u32 = fixture.Emit(ValueOpcode::UndefU32);
+  const auto f_from_u = fixture.Emit(ValueOpcode::BitCastF32U32, {undef_u32});
+  const auto u_from_f = fixture.Emit(ValueOpcode::BitCastU32F32, {f_from_u});
+
+  // Convert U16/U32
+  const auto c_u16_u32 = fixture.Emit(ValueOpcode::ConvertU16U32, {Value(0x12345678u)});
+  const auto c_u32_u16 = fixture.Emit(ValueOpcode::ConvertU32U16, {Value(static_cast<uint16_t>(0x5678u))});
+  const auto c_u16_cancel = fixture.Emit(ValueOpcode::ConvertU16U32, {undef_u32});
+  const auto c_u32_cancel = fixture.Emit(ValueOpcode::ConvertU32U16, {c_u16_cancel});
+
+  // Convert U8/U32
+  const auto c_u8_u32 = fixture.Emit(ValueOpcode::ConvertU8U32, {Value(0x12345678u)});
+  const auto c_u32_u8 = fixture.Emit(ValueOpcode::ConvertU32U8, {Value(static_cast<uint8_t>(0x78u))});
+  const auto c_u8_cancel = fixture.Emit(ValueOpcode::ConvertU8U32, {undef_u32});
+  const auto c_u32_cancel8 = fixture.Emit(ValueOpcode::ConvertU32U8, {c_u8_cancel});
+
+  // Composite Construct / Extract
+  const auto comp_u64 = fixture.Emit(ValueOpcode::CompositeConstructU64, {Value(0x12345678u), Value(0x9abcdef0u)});
+  const auto ext_u64_0 = fixture.Emit(ValueOpcode::CompositeExtractU64, {comp_u64, Value(0u)});
+  const auto ext_u64_1 = fixture.Emit(ValueOpcode::CompositeExtractU64, {comp_u64, Value(1u)});
+
+  const auto comp3 = fixture.Emit(ValueOpcode::CompositeConstructU32x3, {Value(10u), Value(20u), Value(30u)});
+  const auto ext3_1 = fixture.Emit(ValueOpcode::CompositeExtractU32x3, {comp3, Value(1u)});
+
+  const auto comp4 = fixture.Emit(ValueOpcode::CompositeConstructU32x4, {Value(1u), Value(2u), Value(3u), Value(4u)});
+  const auto ext4_3 = fixture.Emit(ValueOpcode::CompositeExtractU32x4, {comp4, Value(3u)});
+
+  // BitFieldInsert zero count identity
+  const auto bfi_zero = fixture.Emit(ValueOpcode::BitFieldInsert, {Value(0x12345678u), Value(0x99u), Value(8u), Value(0u)});
+
+  ConstantPropagationPass(fixture.program.blocks);
+
+  Check(sel_t.Resolve() == Value(42u), "Select true fold failed");
+  Check(sel_f.Resolve() == Value(99u), "Select false fold failed");
+  Check(sel_same.Resolve() == Value(77u), "Select same values fold failed");
+
+  Check(cast_u_f.Resolve() == Value(0x3f800000u), "BitCastU32F32 fold failed");
+  Check(cast_f_u.Resolve() == Value::F32(1.0f), "BitCastF32U32 fold failed");
+  Check(u_from_f.Resolve() == undef_u32, "BitCast round-trip cancellation failed");
+
+  Check(c_u16_u32.Resolve() == Value(static_cast<uint16_t>(0x5678u)), "ConvertU16U32 fold failed");
+  Check(c_u32_u16.Resolve() == Value(0x5678u), "ConvertU32U16 fold failed");
+  Check(c_u32_cancel.Resolve() == undef_u32, "ConvertU32U16 round-trip cancellation failed");
+
+  Check(c_u8_u32.Resolve() == Value(static_cast<uint8_t>(0x78u)), "ConvertU8U32 fold failed");
+  Check(c_u32_u8.Resolve() == Value(0x78u), "ConvertU32U8 fold failed");
+  Check(c_u32_cancel8.Resolve() == undef_u32, "ConvertU32U8 round-trip cancellation failed");
+
+  Check(comp_u64.Resolve() == Value(uint64_t{0x9abcdef012345678ull}), "CompositeConstructU64 fold failed");
+  Check(ext_u64_0.Resolve() == Value(0x12345678u), "CompositeExtractU64 component 0 fold failed");
+  Check(ext_u64_1.Resolve() == Value(0x9abcdef0u), "CompositeExtractU64 component 1 fold failed");
+
+  Check(ext3_1.Resolve() == Value(20u), "CompositeExtractU32x3 component 1 fold failed");
+  Check(ext4_3.Resolve() == Value(4u), "CompositeExtractU32x4 component 3 fold failed");
+  Check(bfi_zero.Resolve() == Value(0x12345678u), "BitFieldInsert zero count identity failed");
+}
+
+void TestDeadCodeEliminationChainsAndSideEffects() {
+  Fixture fixture;
+  // Multistep unused dead code chain:
+  // v1 = IAdd32(1, 2)
+  // v2 = IMul32(v1, 3)
+  // v3 = ISub32(v2, 4)
+  // (v3 has no uses, so v3, v2, v1 should all be dead)
+  const auto v1 = fixture.Emit(ValueOpcode::IAdd32, {Value(1u), Value(2u)});
+  const auto v2 = fixture.Emit(ValueOpcode::IMul32, {v1, Value(3u)});
+  fixture.Emit(ValueOpcode::ISub32, {v2, Value(4u)});
+
+  // Side-effecting instruction with no uses: Barrier
+  // Must NOT be eliminated!
+  fixture.Emit(ValueOpcode::Barrier);
+
+  // Identity chaining:
+  // id1 = Identity(live_const)
+  // id2 = Identity(id1)
+  // ref = ReferenceU32(id2)
+  const auto live_const = Value(1234u);
+  const auto id1 = fixture.Emit(ValueOpcode::Identity, {live_const});
+  const auto id2 = fixture.Emit(ValueOpcode::Identity, {id1});
+  fixture.Emit(ValueOpcode::ReferenceU32, {id2});
+
+  RemoveIdentities(fixture.program.blocks);
+  EliminateDeadCode(fixture.program.blocks);
+
+  const auto &instructions = fixture.BlockAt().Instructions();
+  // We expect only 2 instructions to remain: Barrier and ReferenceU32(1234u)
+  Check(instructions.size() == 2, "DeadCodeElimination did not remove complete dead chain or kept identities");
+  auto it = instructions.begin();
+  Check(it->GetOpcode() == ValueOpcode::Barrier, "Barrier instruction was wrongly eliminated");
+  ++it;
+  Check(it->GetOpcode() == ValueOpcode::ReferenceU32 && it->Arg(0).Resolve() == live_const,
+        "RemoveIdentities failed to resolve transitive identity to live constant");
+}
+
 } // namespace
 
 namespace Common {
@@ -734,6 +999,10 @@ int main() {
     TestControlFlowValueSurvivesReadLaneFolding();
     TestDeadPhiCyclesAndPlanningRoots();
     TestUndefinedRuntimeValueFails();
+    TestConstantPropagationArithmeticAndBitwise();
+    TestConstantPropagationComparisonsAndLogical();
+    TestConstantPropagationConversionsAndCasts();
+    TestDeadCodeEliminationChainsAndSideEffects();
     std::cout << "TypedValuePlanningTests: all cases passed\n";
     return 0;
   } catch (const std::exception &e) {
@@ -752,3 +1021,5 @@ int main() {
 #include "../src/graphics/shader/recompiler/ir/opcodes/ValueOpcodes.cpp"
 #include "../src/graphics/shader/recompiler/ir/passes/ConstantPropagation.cpp"
 #include "../src/graphics/shader/recompiler/ir/passes/DeadCodeElimination.cpp"
+
+
