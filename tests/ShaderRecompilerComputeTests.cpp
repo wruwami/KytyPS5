@@ -26375,6 +26375,82 @@ TestCase CvtPkrtzF16F32RuntimeEdges() {
   return test;
 }
 
+// Round-toward-zero half of an f32, computed with double arithmetic instead of
+// the integer shifts the emitter uses. Finite values above the largest half
+// saturate to it and NaNs keep their truncated payload with the quiet bit set,
+// as on RDNA2.
+u32 ReferenceF32ToF16Rtz(u32 bits) {
+  const u32 sign = (bits >> 16u) & 0x8000u;
+  const u32 abs = bits & 0x7fffffffu;
+  if (abs > 0x7f800000u)
+    return sign | 0x7e00u | ((abs >> 13u) & 0x3ffu);
+  if (abs == 0x7f800000u)
+    return sign | 0x7c00u;
+  const double value = std::bit_cast<float>(abs);
+  if (value >= 65504.0)
+    return sign | 0x7bffu;
+  if (value < 0x1p-14)
+    return sign | static_cast<u32>(value * 0x1p24);
+  int exponent = 0;
+  std::frexp(value, &exponent);
+  const double scaled = std::ldexp(value, 1 - exponent);
+  const auto mantissa = static_cast<u32>((scaled - 1.0) * 1024.0);
+  return sign | (static_cast<u32>(exponent + 14) << 10u) | mantissa;
+}
+
+TestCase CvtPkrtzF16F32ReferenceSweep() {
+  using O = ShaderOpcode;
+  // Every f32 exponent with mantissas on both sides of the 13 dropped bits.
+  // The host driver's own f32 to f16 conversion may round to nearest
+  // (NVIDIA) or toward zero (AMD), so only a sweep like this one shows a
+  // host-dependent rounding step on every GPU (#1575).
+  constexpr std::array<u32, 8> mantissas{0x000000u, 0x000001u, 0x000fffu,
+                                         0x001000u, 0x001fffu, 0x002000u,
+                                         0x400000u, 0x7fffffu};
+  constexpr u32 wave = 64;
+  constexpr u32 pairs = 256u * mantissas.size();
+  constexpr u32 iterations = pairs / wave;
+  TestCase test;
+  test.name = "CvtPkrtzF16F32ReferenceSweep";
+  std::vector<u32> results;
+  for (u32 exponent = 0; exponent < 256u; ++exponent) {
+    for (const u32 mantissa : mantissas) {
+      const u32 low = (exponent << 23u) | mantissa;
+      const u32 high = low ^ 0x80000000u;
+      test.initial.insert(test.initial.end(), {low, high});
+      results.push_back(ReferenceF32ToF16Rtz(low) |
+                        (ReferenceF32ToF16Rtz(high) << 16u));
+    }
+  }
+  const auto output = static_cast<u32>(test.initial.size());
+  test.expected = test.initial;
+  test.expected.insert(test.expected.end(), results.begin(), results.end());
+  test.initial.resize(test.expected.size());
+
+  auto &code = test.code;
+  code.push_back(EncodeVop2(0x1a, 20, InlineU32(3), 0)); // lane * 8 bytes
+  for (u32 i = 0; i < iterations; ++i) {
+    for (u32 reg = 0; reg < 2u; ++reg) {
+      AppendVMovU32(&code, 30, i * wave * 8u + reg * 4u);
+      code.push_back(EncodeVop2(0x25, 30, Vgpr(20), 30));
+      AppendBufferLoadDword(&code, 1u + reg, 30);
+    }
+    code.push_back(EncodeVop2(0x2f, 3, Vgpr(1), 2));
+    AppendStoreVgprAtLaneDwordOffset(&code, 3, 0, output + i * wave);
+  }
+  AppendEnd(&code);
+  test.opcodes = {O::V_LSHLREV_B32, O::V_MOV_B32, O::V_ADD_NC_U32,
+                  O::BUFFER_LOAD_DWORD, O::V_CVT_PKRTZ_F16_F32,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.forbidden_spirv = {"PackHalf2x16", "UnpackHalf2x16"};
+  test.compute_info.threads_num[0] = wave;
+  test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1;
+  test.compute_info.thread_ids_num = 1;
+  test.compute_info.wave_size = wave;
+  test.has_compute_info = true;
+  return test;
+}
+
 TestCase CvtPkrtzF16F32SdwaAndOutputModifiers() {
   using O = ShaderOpcode;
 
@@ -42934,6 +43010,7 @@ std::vector<TestCase> MakeCases() {
   AddCase(CvtPkU8F32PacksSelectedByte);
   AddCase(CvtPkrtzF16F32SubnormalRoundsTowardZero);
   AddCase(CvtPkrtzF16F32RuntimeEdges);
+  AddCase(CvtPkrtzF16F32ReferenceSweep);
   AddCase(CvtPkrtzF16F32SdwaAndOutputModifiers);
   AddCase(PackedMinMaxF16NanAndSignedZeroEdges);
   AddCase(VectorMinMaxF16Ops);
@@ -48937,6 +49014,7 @@ int main(int argc, char **argv) {
     VulkanHarness vulkan;
     RunCase(&vulkan, CvtPkrtzF16F32SubnormalRoundsTowardZero());
     RunCase(&vulkan, CvtPkrtzF16F32RuntimeEdges());
+    RunCase(&vulkan, CvtPkrtzF16F32ReferenceSweep());
     RunCase(&vulkan, CvtPkrtzF16F32SdwaAndOutputModifiers());
     return 0;
   }
