@@ -4830,6 +4830,99 @@ void TestTlsStubsPreserveFlags() {
 	Libs::LibKernel::Memory::FreeGuestMemory(mapping, stub_size + CODE_SIZE);
 	Check(test, preserved, "TLS stubs changed the caller's flags or registers");
 }
+
+// Transport Fever 2 (#1763) loads its TLS base with mov r8, qword ptr fs:[0]
+// (64 4c 8b 04 25 00 00 00 00). Patch each destination register the way PatchProgram does
+// and check that the register receives the TLS address and rax survives.
+void TestTlsLoadPatchExtendedRegisters() {
+	const char*        test      = "TlsLoadPatchExtendedRegisters";
+	const uint64_t     stub_size = Loader::Jit::SafeCall::GetSize();
+	constexpr uint64_t CODE_SIZE = 0x1000;
+	constexpr uint64_t RAX       = 0x5555555555555555ull;
+	const auto         mapping   = Libs::LibKernel::Memory::AllocateProgramMemory(
+	    0x0000000907000000ull, stub_size + CODE_SIZE, Common::VirtualMemory::Mode::ExecuteReadWrite,
+	    "tls_load_patch_test");
+	Check(test, mapping != 0, "failed to allocate TLS patch test code");
+	auto* safe_call = new (reinterpret_cast<void*>(mapping)) Loader::Jit::SafeCall;
+	safe_call->SetFunc(TlsStubTestAddress);
+	for (uint8_t reg = 1; reg < 16; reg++) {
+		if (reg == 4) {
+			continue;
+		}
+		auto* stub = new (reinterpret_cast<void*>(mapping + Loader::Jit::TlsRegStub::GetOffset(reg)))
+		    Loader::Jit::TlsRegStub;
+		stub->SetFunc(mapping);
+		stub->SetOutputReg(reg);
+	}
+
+	const std::array<uint8_t, 9> reported {0x64, 0x4c, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00};
+	uint8_t                      reported_reg = 0;
+	Check(test, Loader::Jit::MatchTlsLoad(reported.data(), &reported_reg) && reported_reg == 8,
+	      "mov r8, fs:[0] was not recognized as a TLS load");
+
+	using Fixture = void(KYTY_SYSV_ABI*)(uint64_t*);
+	std::string failures;
+	for (uint8_t reg = 0; reg < 16; reg++) {
+		if (reg == 4) {
+			continue;
+		}
+		const std::array<uint8_t, 9> load {
+		    0x64, static_cast<uint8_t>(reg >= 8 ? 0x4c : 0x48), 0x8b,
+		    static_cast<uint8_t>(0x04u | ((reg & 7u) << 3u)), 0x25, 0x00, 0x00, 0x00, 0x00};
+		uint8_t matched = 0xff;
+		if (!Loader::Jit::MatchTlsLoad(load.data(), &matched) || matched != reg) {
+			failures += fmt::format(" reg{}: not matched;", reg);
+			continue;
+		}
+
+		// The fixture saves every callee-saved register it may load into, and keeps the output
+		// pointer in a register other than the target.
+		const Xbyak::Reg64   target(reg);
+		Xbyak::CodeGenerator code(CODE_SIZE, reinterpret_cast<void*>(mapping + stub_size));
+		const Xbyak::Reg64   out = reg == 3 ? code.r12 : code.rbx;
+		code.push(code.rbx);
+		code.push(code.rbp);
+		code.push(code.r12);
+		code.push(code.r13);
+		code.push(code.r14);
+		code.push(code.r15);
+		code.mov(out, code.rdi);
+		code.mov(code.rax, RAX);
+		if (reg != 0) {
+			code.mov(target, 0xdeadull);
+		}
+		const auto load_offset = code.getSize();
+		for (const auto byte: load) {
+			code.db(byte);
+		}
+		code.mov(code.qword[out], target);
+		code.mov(code.qword[out + 8], code.rax);
+		code.pop(code.r15);
+		code.pop(code.r14);
+		code.pop(code.r13);
+		code.pop(code.r12);
+		code.pop(code.rbp);
+		code.pop(code.rbx);
+		code.ret();
+		Check(test, Xbyak::GetError() == 0, "failed to generate TLS patch fixture");
+
+		// Same replacement as PatchProgram: call the handler (rax) or the register's stub.
+		auto* call = new (reinterpret_cast<void*>(mapping + stub_size + load_offset))
+		    Loader::Jit::Call9;
+		call->SetFunc(reg == 0 ? mapping : mapping + Loader::Jit::TlsRegStub::GetOffset(reg));
+		Check(test, Common::VirtualMemory::FlushInstructionCache(mapping, stub_size + CODE_SIZE),
+		      "failed to flush TLS patch test code");
+
+		std::array<uint64_t, 2> registers {};
+		reinterpret_cast<Fixture>(mapping + stub_size)(registers.data());
+		const uint64_t expected_rax = reg == 0 ? 0x123456789abcull : RAX;
+		if (registers[0] != 0x123456789abcull || registers[1] != expected_rax) {
+			failures += fmt::format(" reg{}: value={:#x} rax={:#x};", reg, registers[0], registers[1]);
+		}
+	}
+	Libs::LibKernel::Memory::FreeGuestMemory(mapping, stub_size + CODE_SIZE);
+	Check(test, failures.empty(), "patched TLS loads:" + failures);
+}
 #endif
 
 int main(int argc, char** argv) {
@@ -4978,6 +5071,7 @@ int main(int argc, char** argv) {
 	RunTest(TestModuleRelocationUsesWritableHostMapping);
 #if defined(__linux__) || KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	RunTest(TestTlsStubsPreserveFlags);
+	RunTest(TestTlsLoadPatchExtendedRegisters);
 #endif
 
 	if (g_failed_tests != 0) {
