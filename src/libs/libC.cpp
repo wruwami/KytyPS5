@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/hostMemory.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
+#include "libs/guestExit.h"
 #include "libs/guestPrintf.h"
 #include "libs/libs.h"
 #include "libs/vaContext.h"
@@ -71,7 +72,7 @@ const char** GetArgv() {
 static KYTY_SYSV_ABI void exit(int code) {
 	PRINT_NAME();
 
-	::exit(code);
+	GuestExit(code);
 }
 
 static void PrintAbortStringCandidate(const char* name, uint64_t addr) {
