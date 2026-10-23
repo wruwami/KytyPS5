@@ -16,6 +16,7 @@
 #include "kernel/semaphore.h"
 #include "kernel/syncOnAddress.h"
 #include "libs/errno.h"
+#include "libs/guestExit.h"
 #include "libs/libs.h"
 #include "libs/network.h"
 #include "loader/elf.h"
@@ -1684,7 +1685,7 @@ static void KYTY_SYSV_ABI KernelDebugRaiseException(int /*c1*/, int /*c2*/) {
 static void KYTY_SYSV_ABI exit(int code) {
 	PRINT_NAME();
 
-	::exit(code);
+	GuestExit(code);
 }
 
 static KYTY_SYSV_ABI MallocReplace* KernelGetSanitizerMallocReplaceExternal() {
