@@ -51,7 +51,11 @@ struct TlsRegStub {
 		*reinterpret_cast<uint32_t*>(&code[9]) = offset32;
 	}
 
-	void SetOutputReg(uint8_t reg) { code[15] = 0xc0u | (reg & 7u); }
+	// REX.B selects r8-r15 as the destination of mov <reg>,rax.
+	void SetOutputReg(uint8_t reg) {
+		code[13] = reg >= 8 ? 0x49 : 0x48;
+		code[15] = 0xc0u | (reg & 7u);
+	}
 
 	static uint64_t GetOffset(uint8_t reg) {
 		return 0x100 + static_cast<uint64_t>(reg) * GetSize();
@@ -71,6 +75,20 @@ struct TlsRegStub {
 	                    0x00, 0x00, 0x00, 0xC3, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
 };
 
+// Matches mov <reg>, qword ptr fs:[0x00] (64 REX.W 8B /r, SIB disp32 0) and returns the
+// destination register. REX.R (0x4C) selects r8-r15.
+inline bool MatchTlsLoad(const uint8_t* inst, uint8_t* reg) {
+	const uint8_t rex   = inst[1];
+	const uint8_t modrm = inst[3];
+	if (inst[0] != 0x64 || (rex != 0x48 && rex != 0x4C) || inst[2] != 0x8B ||
+	    (modrm & 0xc7u) != 0x04u || inst[4] != 0x25 || inst[5] != 0 || inst[6] != 0 ||
+	    inst[7] != 0 || inst[8] != 0) {
+		return false;
+	}
+	*reg = static_cast<uint8_t>(((rex & 0x04u) << 1u) | ((modrm >> 3u) & 7u));
+	return true;
+}
+
 struct SafeCall {
 	using func_t = KYTY_MS_ABI uint8_t* (*)();
 
@@ -79,21 +97,21 @@ struct SafeCall {
 	static uint64_t GetSize() { return 0x1000; }
 
 	uint8_t code[0x90] = {
-	    /*00*/ 0x48, 0x8d, 0x64, 0x24, 0x80,             // lea    rsp,[rsp-0x80]
-	    /*05*/ 0x66, 0x90,                               // nop
-	    /*07*/ 0x9c,                                     // pushfq
-	    /*08*/ 0x51,                                     // push   rcx
-	    /*09*/ 0x52,                                     // push   rdx
-	    /*0a*/ 0x41, 0x50,                               // push   r8
-	    /*0c*/ 0x41, 0x51,                               // push   r9
-	    /*0e*/ 0x41, 0x52,                               // push   r10
-	    /*10*/ 0x41, 0x53,                               // push   r11
-	    /*12*/ 0x53,                                     // push   rbx
-	    /*13*/ 0x57,                                     // push   rdi
-	    /*14*/ 0x56,                                     // push   rsi
-	    /*15*/ 0x48, 0x89, 0xe3,                         // mov    rbx,rsp
-	    /*18*/ 0x48, 0x83, 0xe4, 0xf0,                   // and    rsp,0xfffffffffffffff0
-	    /*1c*/ 0x48, 0x83, 0xec, 0x20,                   // sub    rsp,0x20
+	    /*00*/ 0x48, 0x8d, 0x64, 0x24, 0x80, // lea    rsp,[rsp-0x80]
+	    /*05*/ 0x66, 0x90,                   // nop
+	    /*07*/ 0x9c,                         // pushfq
+	    /*08*/ 0x51,                         // push   rcx
+	    /*09*/ 0x52,                         // push   rdx
+	    /*0a*/ 0x41, 0x50,                   // push   r8
+	    /*0c*/ 0x41, 0x51,                   // push   r9
+	    /*0e*/ 0x41, 0x52,                   // push   r10
+	    /*10*/ 0x41, 0x53,                   // push   r11
+	    /*12*/ 0x53,                         // push   rbx
+	    /*13*/ 0x57,                         // push   rdi
+	    /*14*/ 0x56,                         // push   rsi
+	    /*15*/ 0x48, 0x89, 0xe3,             // mov    rbx,rsp
+	    /*18*/ 0x48, 0x83, 0xe4, 0xf0,       // and    rsp,0xfffffffffffffff0
+	    /*1c*/ 0x48, 0x83, 0xec, 0x20,       // sub    rsp,0x20
 	    /*20*/ 0x48, 0xb9, 0x88, 0x77, 0x66, 0x55, 0x44,
 	    0x33,        0x22, 0x11, // movabs rcx,0x1122334455667788
 	    /*2a*/ 0xff, 0xd1,       // call   rcx
